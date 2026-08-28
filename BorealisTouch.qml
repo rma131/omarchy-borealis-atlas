@@ -86,8 +86,10 @@ Item {
   // release inside both is a dismiss, anything beyond either is interaction.
   readonly property int holdMs: 300
   readonly property real dragPx: 12
-  // dragging the full width of the screen advances one whole day
-  readonly property real todGain: 1.0
+  // Days covered by dragging the full width of the screen. The window is now 23
+  // days wide, so at 1.0 crossing it took 23 swipes; 2.5 still leaves about two
+  // minutes of forecast per pixel, which is far finer than the hourly data.
+  readonly property real todGain: 2.5
 
   // the clock is the default: whatever time it actually is when you summon it
   function clockFraction() {
@@ -154,9 +156,11 @@ Item {
   // derived from the data itself so it follows the fetch parameters. With
   // past_days=1 the earliest real hour is yesterday 00:00 — there is no data
   // for the day before that, so the drag must not pretend otherwise.
-  readonly property real todMin: (fc && fc.code.length) ? fc.t0 / 24.0 : -1.0
+  readonly property real todMin: (fc && fc.code.length) ? fc.t0 / 24.0 : -7.0
   readonly property real todMax: (fc && fc.code.length)
                                  ? (fc.t0 + fc.code.length - 1) / 24.0 : 2.95
+  // Kp only forecasts ~3 days; past that o.kp stays null and the aurora falls
+  // back to the floor rather than pretending to know.
 
   property var loc: null      // { lat, lon, name }
   property var fc: null       // { t0, code[], precip[], cloud[], temp[] }
@@ -301,7 +305,7 @@ Item {
       "https://api.open-meteo.com/v1/forecast"
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
       + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
-      + "&past_days=1&forecast_days=3&timezone=auto"]
+      + "&past_days=7&forecast_days=16&timezone=auto"]   // 16 is the API max
     fcProc.running = true
   }
 
@@ -593,7 +597,6 @@ Item {
         // requires a quick two-finger tap with no movement at all.
         if (touchArea.activeCount >= 1 && touchArea.gestureMoved) root.cycleInspect()
         root.todReturning = false
-        root.scrubbing = true
         readoutHideTimer.stop()
         touchArea.activeCount += points.length
         touchArea.gestureMaxPoints = Math.max(touchArea.gestureMaxPoints, touchArea.activeCount)
@@ -619,7 +622,12 @@ Item {
           if (pt.pointId === touchArea.gestureId) {
             var dx = pt.x - touchArea.gestureStartX
             var dy = pt.y - touchArea.gestureStartY
-            if (Math.sqrt(dx * dx + dy * dy) > root.dragPx) touchArea.gestureMoved = true
+            if (Math.sqrt(dx * dx + dy * dy) > root.dragPx) {
+              // the readout appears only once this is a real scrub, not on a
+              // bare touch — a resting finger should leave the sky alone
+              touchArea.gestureMoved = true
+              root.scrubbing = true
+            }
             // Inverted on purpose: you grab the sky and pull it, the way you
             // scroll content. Dragging left pulls later hours in from the right.
             var slide = (pt.x - touchArea.todStartX) / Math.max(width, 1)
