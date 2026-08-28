@@ -37,6 +37,10 @@ layout(std140, binding = 0) uniform buf {
     // Time of day as a fraction of 24 h: 0.00 midnight, 0.25 sunrise,
     // 0.50 noon, 0.75 sunset. Seeded from the real clock, dragged left to right.
     float tod;
+    // Real sky data, resolved in QML so the shader needs no arrays or lookups.
+    vec4 wx;      // x cloud cover, y rain, z snow, w thunder
+    vec4 astro;   // x lunar phase (0 new .5 full), y aurora probability,
+                  // z inspect reveal, w special-moon emphasis
 };
 
 const float WATERLINE = 0.82;
@@ -104,6 +108,30 @@ float cloudField(vec2 p, float t) {
   vec2 lo = vec2((p.x + t * CLOUD_WIND) * 2.6, (p.y + swell) * 13.0);
   vec2 hi = vec2((p.x + t * CLOUD_WIND * 0.45) * 5.3, (p.y - swell) * 26.0 + 4.7);
   return vnoise(lo) * 0.65 + vnoise(hi) * 0.35;
+}
+
+// ---- precipitation --------------------------------------------------------
+// Composited in main() over the finished scene rather than inside upperScene:
+// rain falls in FRONT of the water's reflection, so drawing it there is both
+// more correct and skips the five reflection taps entirely.
+float rainLayer(vec2 p, float t, float speed, float scale, float slant) {
+  vec2 q = vec2((p.x + p.y * slant) * scale, p.y * scale * 0.55 - t * speed);
+  vec2 c = floor(q), f = fract(q);
+  float h = hash21(c);
+  if (h < 0.62) return 0.0;
+  float x = smoothstep(0.055, 0.0, abs(f.x - fract(h * 7.3)));
+  // a short dash inside the cell, not a full-height scratch
+  return x * smoothstep(0.0, 0.10, f.y) * smoothstep(0.60, 0.16, f.y);
+}
+
+float snowLayer(vec2 p, float t, float speed, float scale) {
+  vec2 q = vec2(p.x * scale, p.y * scale - t * speed);
+  vec2 c = floor(q), f = fract(q);
+  float h = hash21(c);
+  if (h < 0.62) return 0.0;
+  // sway, so flakes drift rather than fall on rails
+  vec2 ctr = vec2(fract(h * 7.3) + sin(t * 0.7 + h * 30.0) * 0.20, fract(h * 3.1));
+  return smoothstep(0.17, 0.0, length(f - ctr));
 }
 
 // ---- touch: a repulsion field ------------------------------------------
@@ -255,9 +283,13 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   float sunAlt    = sin(dayPhase * 3.14159265);
   vec2  sunUV     = vec2(mix(0.10, 0.90, dayPhase), HORIZON - sunAlt * SUN_ARC);
 
-  float moonPhase = (fract(td + 0.5) - 0.25) * 2.0;
-  float moonAlt   = sin(moonPhase * 3.14159265);
-  vec2  moonUV    = vec2(mix(0.10, 0.90, moonPhase), HORIZON - moonAlt * SUN_ARC);
+  // The moon's offset from the sun IS its phase: new rides with the sun, full
+  // opposes it, first quarter transits at 18:00. The old fract(td + 0.5)
+  // silently assumed a full moon every night.
+  float lunar     = astro.x;
+  float moonDay   = (fract(td - lunar) - 0.25) * 2.0;
+  float moonAlt   = sin(moonDay * 3.14159265);
+  vec2  moonUV    = vec2(mix(0.10, 0.90, moonDay), HORIZON - moonAlt * SUN_ARC);
 
   float day   = smoothstep(-0.04, 0.32, sunAlt);        // 1 in full daylight
   float gold  = exp(-sunAlt * sunAlt * 26.0);           // the golden-hour band
@@ -303,42 +335,91 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     }
   }
 
-  // crescent moon, riding the opposite half of the clock from the sun
-  float moonAmt = smoothstep(-0.06, 0.08, moonAlt) * (1.0 - day * 0.85);
+  // ---- aurora: drawn here, beneath the moon and the cloud, because it is
+  // 100 km up and the weather is not. Held in a variable so the cloud and the
+  // ridge can be lit by it further down.
+  vec3 auroraCol = vec3(0.0);
+  float auroraAmt = night * max(astro.y, 0.0) * (1.0 + astro.z * 1.10);
+  if (auroraAmt > 0.0) {
+    // sampling at uv - duv moves the light outward, away from the finger
+    vec2 cuv = uv - fp.xy;
+    vec3 cur = curtain(cuv, t, 0.18, 0.55, 1.00,
+                       vec3(1.3, 2.7, 5.1), vec3(0.05, 0.03, 0.015),
+                       vec3(0.21, -0.13, 0.31), 23.0, 0.7)
+             + curtain(cuv, t, 0.30, 0.42, 0.75,
+                       vec3(0.9, 2.1, 4.3), vec3(0.06, 0.035, 0.02),
+                       vec3(-0.15, 0.19, -0.27), 17.0, -0.5)
+             + curtain(cuv, t, 0.42, 0.32, 0.55,
+                       vec3(1.7, 3.3, 6.5), vec3(0.04, 0.025, 0.012),
+                       vec3(0.11, -0.23, 0.17), 31.0, 0.9);
+    auroraCol = cur * fp.z * auroraAmt;
+    col += auroraCol;
+  }
+
+  // the moon, with a real terminator
+  // a real moon is faintly there in daylight too, so the day fade is gentle
+  float moonAmt = smoothstep(-0.06, 0.08, moonAlt) * (1.0 - day * 0.55);
   if (moonAmt > 0.0) {
-    vec2 mp = (uv - moonUV) * vec2(aspect, 1.0);
-    float r = 0.055;
+    float r  = 0.055 * (1.0 + astro.w * 0.40);   // perigee + event emphasis
+    vec2  mp = (uv - moonUV) * vec2(aspect, 1.0);
     float d1 = length(mp);
-    float d2 = length(mp - vec2(0.020, -0.009));
-    float crescent = clamp(smoothstep(r, r - 0.004, d1)
-                         - smoothstep(r * 1.04, r * 1.04 - 0.004, d2), 0.0, 1.0);
+    float disc = smoothstep(r, r - 0.0035, d1);
+    // The terminator projects to an ellipse whose x-radius is cos(2*pi*phase);
+    // waxing lights the right limb, waning the left.
+    vec2  q  = mp / r;
+    float c  = cos(6.28318 * lunar);
+    float xt = c * sqrt(max(0.0, 1.0 - q.y * q.y));
+    float lit = (lunar < 0.5) ? smoothstep(xt - 0.06, xt + 0.06, q.x)
+                              : smoothstep(-xt + 0.06, -xt - 0.06, q.x);
+    float illum = (1.0 - c) * 0.5;
     vec3 moonCol = vec3(0.95, 0.93, 0.85);
-    col = mix(col, moonCol, crescent * moonAmt);
-    col += moonCol * exp(-d1 * 34.0) * 0.10 * moonAmt;
+    // Earthshine is a ghost, not a grey disc: the unlit limb stays mostly
+    // transparent so the sky shows through, and it only reads at all once the
+    // sky is dark.
+    float ashen = 0.04 + 0.11 * night;
+    col = mix(col, moonCol, disc * moonAmt * (ashen + (1.0 - ashen) * lit));
+    col += moonCol * exp(-d1 * 34.0) * 0.10 * moonAmt * (0.25 + 0.75 * illum)
+           * (1.0 + astro.w * 0.8);
   }
 
   // Cloud deck. Displaced by the touch field exactly like the curtains, so
   // pushing the sky slides the sunlit highlight across the cloud instead of the
   // cloud simply moving under a fixed glow. Held at zero through the night, so
   // the night scene costs exactly what it did before the cycle existed.
-  float cloudAmt = clamp(0.85 * day + 0.55 * gold, 0.0, 1.0);
+  // real cover overrides the fair-weather default, and holds through the night
+  float cloudAmt = clamp(max(0.85 * day + 0.55 * gold, wx.x), 0.0, 1.0);
+  cloudAmt *= 1.0 - astro.z * 0.88;            // inspect parts the deck
   if (cloudAmt > 0.02) {
     vec2 puv = uv - fp.xy;
     float cd = cloudField(puv, t);
-    cd = smoothstep(0.54, 0.88, cd);
-    cd *= smoothstep(0.16, 0.36, uv.y) * (1.0 - smoothstep(0.60, 0.80, uv.y));
+    // Cover does two things: it lowers the threshold so the deck closes up
+    // instead of staying wispy, and it widens the band vertically. Without
+    // this, 95% cover still rendered as a few streaks over a sunny sky.
+    cd = smoothstep(mix(0.60, 0.16, cloudAmt), mix(0.92, 0.52, cloudAmt), cd);
+    float cTop = 0.16 - 0.12 * cloudAmt;
+    float cBot = 0.60 + 0.18 * cloudAmt;
+    cd *= smoothstep(cTop, cTop + 0.18, uv.y)
+        * (1.0 - smoothstep(cBot, cBot + 0.18, uv.y));
     if (cd > 0.0) {
       // grazing sun gives red underlight, high sun gives white
       float prox = exp(-length((puv - sunUV) * vec2(aspect, 1.0)) * 2.4);
       vec3 lit    = mix(vec3(1.00, 0.42, 0.26), vec3(1.00, 0.97, 0.93),
                         smoothstep(0.0, 0.50, sunAlt));
       vec3 shade0 = mix(vec3(0.20, 0.19, 0.32), vec3(0.55, 0.60, 0.70), day);
+      // a storm deck is bruised, not bright
+      shade0 = mix(shade0, shade0 * 0.30, wx.w);
       vec3 shade  = mix(shade0, shade0 * (0.45 + 0.95 * sig), PALETTE_TINT);
+      // the deck is lit from above by the aurora, so overcast auroral nights
+      // read as glowing cloud rather than a hidden aurora
+      shade += auroraCol * 1.30;
       // compression concentrates the highlight, same as it does the aurora
       vec3 cc = mix(shade, lit, clamp(prox * fp.z, 0.0, 1.0));
-      col = mix(col, cc, cd * cloudAmt * 0.55);
+      col = mix(col, cc, cd * mix(0.55, 0.94, cloudAmt));
     }
   }
+
+  // heavy weather kills the light
+  col *= 1.0 - 0.50 * wx.w - 0.22 * max(0.0, wx.x - 0.55);
 
   // the sun itself, once it clears the horizon
   float sunAmt = smoothstep(-0.10, 0.01, sunAlt);
@@ -352,21 +433,6 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     col += sunCol * exp(-sd * 42.0) * 0.55 * sunAmt;   // tight halo
     col = mix(col, vec3(1.0, 0.97, 0.90), smoothstep(0.030, 0.025, sd) * sunAmt);
   }
-
-  // three curtain layers, aurora.py self.layers
-  // sampling at uv - duv moves the light outward, away from the finger
-  vec2 cuv = uv - fp.xy;
-  // accumulate the three layers, then apply the emission gain once
-  vec3 cur = curtain(cuv, t, 0.18, 0.55, 1.00,
-                     vec3(1.3, 2.7, 5.1), vec3(0.05, 0.03, 0.015),
-                     vec3(0.21, -0.13, 0.31), 23.0, 0.7)
-           + curtain(cuv, t, 0.30, 0.42, 0.75,
-                     vec3(0.9, 2.1, 4.3), vec3(0.06, 0.035, 0.02),
-                     vec3(-0.15, 0.19, -0.27), 17.0, -0.5)
-           + curtain(cuv, t, 0.42, 0.32, 0.55,
-                     vec3(1.7, 3.3, 6.5), vec3(0.04, 0.025, 0.012),
-                     vec3(0.11, -0.23, 0.17), 31.0, 0.9);
-  col += cur * fp.z * night;
 
   // meteors streak over the curtains
   col += meteors(uv, t, aspect) * starAmt;
@@ -396,6 +462,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
                    mix(vec3(52.0, 66.0, 50.0), vec3(24.0, 34.0, 26.0),
                        clamp(into * 1.7, 0.0, 1.0)), day) / 255.0;
     mtn += vec3(0.030, 0.045, 0.060) * exp(-into * 50.0);
+    mtn += auroraCol * 0.30;   // the land is bathed in it, not lit past it
     col = mix(col, mtn, m);
   }
 
@@ -407,6 +474,10 @@ void main() {
   float t = time;
   float aspect = resolution.x / resolution.y;
   vec2 tp = vec2(uv.x * aspect, uv.y);   // aspect-corrected, for touch only
+  // One screen-space field per frame: the water's surface chop, the sky's
+  // displacement and the precipitation all read the same disturbance. It used
+  // to be evaluated separately in both branches.
+  vec3 screenFld = touchField(tp, t, aspect);
   vec3 col;
 
   if (uv.y >= WATERLINE) {
@@ -420,9 +491,8 @@ void main() {
              * sin(uv.y * 11.0 - t * 0.9);
     ruv.y += 0.004 * depth * sin(uv.x * 18.0 + uv.y * 26.0 + t * 0.8);
     // Surface chop where the finger actually meets the water, on screen.
-    vec3 sfld = touchField(tp, t, aspect);
-    ruv.x += sfld.x * 0.30;
-    ruv.y += sfld.y * 0.22;
+    ruv.x += screenFld.x * 0.30;
+    ruv.y += screenFld.y * 0.22;
     ruv = clamp(ruv, 0.0, 1.0);
 
     // 5 taps at tight spacing (sparse wide taps ghost thin features);
@@ -450,7 +520,33 @@ void main() {
     col = refl * shimmer * (0.62 - 0.34 * depth) + vec3(0.010, 0.018, 0.038);
     col += vec3(0.05, 0.08, 0.10) * smoothstep(0.015, 0.0, uv.y - WATERLINE);
   } else {
-    col = upperScene(uv, t, fieldParams(touchField(tp, t, aspect), aspect));
+    col = upperScene(uv, t, fieldParams(screenFld, aspect));
+  }
+
+  // ---- weather, over everything, displaced by the same finger -------------
+  vec2 wp = tp - screenFld.xy * 0.7;
+  if (wx.y > 0.0) {
+    float r = rainLayer(wp, t, 1.5, 30.0, 0.22) * 0.55
+            + rainLayer(wp, t, 2.3, 46.0, 0.28) * 0.32;
+    col += vec3(0.56, 0.66, 0.82) * r * wx.y * 0.80;
+    // and it dapples the water it lands on
+    if (uv.y >= WATERLINE) {
+      float dp = vnoise(vec2(uv.x * 110.0, uv.y * 260.0 + t * 7.0));
+      col += vec3(0.09, 0.12, 0.15) * smoothstep(0.60, 0.96, dp) * wx.y;
+    }
+  }
+  if (wx.z > 0.0) {
+    float sn = snowLayer(wp, t, 0.22, 20.0) * 0.70
+             + snowLayer(wp, t, 0.34, 31.0) * 0.45;
+    col += vec3(0.92, 0.95, 1.00) * sn * wx.z;
+  }
+  if (wx.w > 0.0) {
+    // gate each strike on a hash of the period so they are not metronomic
+    float per   = floor(t * 0.31);
+    float ph    = fract(t * 0.31);
+    float fire  = step(hash21(vec2(per, 11.0)), wx.w * 0.55);
+    float flash = fire * exp(-ph * 26.0) * (0.55 + 0.45 * hash21(vec2(per, 3.0)));
+    col += vec3(0.72, 0.78, 1.00) * flash * 0.60;
   }
 
   fragColor = vec4(clamp(col + dither(uv), 0.0, 1.0), 1.0) * qt_Opacity;
