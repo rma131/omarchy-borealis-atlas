@@ -72,6 +72,27 @@ float vnoise(vec2 p) {
              mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
 }
 
+// Dawn keeps its real colours where it matters — the warm horizon and the sun
+// are lit by physics, not by the theme. Only the cool half of the scene (the
+// zenith and the shaded side of the cloud) takes a hint of the palette, so a
+// warm palette reads as contrast against a cool sky and a cool one harmonises
+// with it. Kept a hint on purpose: this is a sunrise, not a colour swap.
+const float PALETTE_TINT = 0.30;
+
+// the palette's identity with its brightness divided out, so only hue carries
+vec3 paletteSig() {
+  vec3 c = stop2.rgb;
+  return c / max(max(max(c.r, c.g), c.b), 0.001);
+}
+
+// Wispy dawn deck. Stretched hard in x so the bands run parallel to the
+// curtains — texture rather than weather. Two octaves is plenty at this
+// opacity, and it only ever runs while dawn > 0.
+float cloudField(vec2 p, float t) {
+  vec2 q = vec2(p.x * 2.6 + t * 0.010, p.y * 13.0);
+  return vnoise(q) * 0.65 + vnoise(q * 2.1 + vec2(t * 0.017, 0.0)) * 0.35;
+}
+
 // ---- touch: a repulsion field ------------------------------------------
 // The finger is a repulsor in the aurora, not a lamp painted on top of it.
 // Each slot contributes a radial field; the aurora is sampled through that
@@ -212,9 +233,14 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
 
   // sky gradient, warmed toward a dawn horizon as the vault turns
   vec3 col = skyBase.rgb + skyAmp.rgb * (1.0 - uv.y);
+  vec3 sig = vec3(1.0);
+  vec2 sunUV = vec2(0.28, 1.10 - dawn * 0.82);
   if (dawn > 0.0) {
-    vec3 dsky = mix(vec3(0.05, 0.09, 0.24), vec3(0.98, 0.54, 0.26),
-                    smoothstep(0.05, 0.82, uv.y));
+    sig = paletteSig();
+    vec3 zen0 = vec3(0.06, 0.10, 0.26);
+    // multiply rather than blend toward the hue: shifts colour, keeps luminance
+    vec3 zen  = mix(zen0, zen0 * (0.45 + 0.95 * sig), PALETTE_TINT);
+    vec3 dsky = mix(zen, vec3(0.98, 0.54, 0.26), smoothstep(0.05, 0.82, uv.y));
     col = mix(col, dsky, dawn);
   }
   // stars and meteors wash out as the sky lightens
@@ -260,12 +286,35 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     col += moonCol * exp(-d1 * 34.0) * 0.10 * moonAmt;
   }
 
+  // Dawn cloud deck. Displaced by the touch field exactly like the curtains, so
+  // pushing the sky slides the sunlit highlight across the cloud instead of the
+  // cloud simply moving under a fixed glow.
+  if (dawn > 0.0) {
+    vec2 puv = uv - fp.xy;
+    float cd = cloudField(puv, t);
+    cd = smoothstep(0.54, 0.88, cd);
+    cd *= smoothstep(0.16, 0.36, uv.y) * (1.0 - smoothstep(0.60, 0.80, uv.y));
+    if (cd > 0.0) {
+      // how the deck is lit depends on where the sun sits relative to the
+      // horizon: low and grazing gives red underlight, higher gives gold
+      float alt  = clamp((0.74 - sunUV.y) / 0.42, 0.0, 1.0);
+      float prox = exp(-length((puv - sunUV) * vec2(aspect, 1.0)) * 2.4);
+      vec3 lit    = mix(vec3(1.00, 0.42, 0.26), vec3(1.00, 0.84, 0.62), alt);
+      vec3 shade0 = mix(vec3(0.20, 0.19, 0.32), vec3(0.34, 0.34, 0.42), alt);
+      vec3 shade  = mix(shade0, shade0 * (0.45 + 0.95 * sig), PALETTE_TINT);
+      // compression concentrates the highlight, same as it does the aurora
+      vec3 cc = mix(shade, lit, clamp(prox * fp.z, 0.0, 1.0));
+      col = mix(col, cc, cd * dawn * 0.55);
+    }
+  }
+
   // a far sun climbing out of the ridge on the other side
   float sunAmt = smoothstep(0.18, 0.62, dawn);
   if (sunAmt > 0.0) {
-    vec2 sp = (uv - vec2(0.28, 1.10 - dawn * 0.82)) * vec2(aspect, 1.0);
+    vec2 sp = (uv - sunUV) * vec2(aspect, 1.0);
     float sd = length(sp);
-    vec3 sunCol = vec3(1.0, 0.86, 0.60);
+    vec3 sunCol = mix(vec3(1.0, 0.86, 0.60),
+                      vec3(1.0, 0.86, 0.60) * (0.72 + 0.46 * sig), 0.15);
     col += sunCol * exp(-sd *  9.0) * 0.30 * sunAmt;   // broad haze
     col += sunCol * exp(-sd * 42.0) * 0.55 * sunAmt;   // tight halo
     col = mix(col, vec3(1.0, 0.97, 0.90), smoothstep(0.030, 0.025, sd) * sunAmt);

@@ -134,6 +134,26 @@ night. It is measured **relative to where the drag began**, so touching high on
 the screen does not snap to daylight. Let go and it eases back to night over
 ~1.5 s, so the resting screensaver is unchanged.
 
-It costs nothing while it is night — every addition sits behind `if (dawn > 0.0)`,
-which is uniform across the draw. Tunables: `dawnGain` in the QML (how much drag
-covers the full range) and the `dawn`-keyed constants in `upperScene`.
+**Clouds.** A wispy deck fades in with dawn, stretched hard in x so the bands run
+parallel to the aurora curtains — texture, not weather. How it is lit depends on
+where the sun sits relative to the horizon: grazing gives red underlight, higher
+gives gold, and cloud far from the sun stays cool. The deck is displaced by the
+touch field exactly like the curtains, and compression concentrates its highlight,
+so pushing the sky slides the sunlit edge across the cloud rather than moving the
+cloud under a fixed glow.
+
+**The palette grounds the dawn without repainting it.** The warm horizon and the
+sun keep their real colours; only the cool half — zenith and the shaded side of
+the cloud — takes a hint of the palette (`PALETTE_TINT`, 0.30), applied as a
+*multiply* so it shifts hue without wrecking luminance. A warm palette therefore
+reads as contrast against a cool sky, a cool one harmonises with it, and it still
+looks like a sunrise rather than a theme swap.
+
+**Cost.** Night is untouched — every addition sits behind `if (dawn > 0.0)`, which
+is uniform across the draw (measured: 761 MHz GPU avg at night, same as without
+this branch). Full dawn runs ~997 MHz, about +31 %, because the cloud noise is
+evaluated inside `upperScene` and so runs five times over in the water band. That
+only applies while you are actually dragging.
+
+Tunables: `dawnGain` in the QML (how much drag covers the range), `PALETTE_TINT`
+and `cloudField` in the shader, and the `dawn`-keyed constants in `upperScene`.
