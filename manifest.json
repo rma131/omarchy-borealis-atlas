@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "local.borealis-touch",
+  "name": "Borealis Touch",
+  "version": "0.1.0",
+  "author": "Marko Stankovic (upstream), touch fork local",
+  "description": "Touch-reactive fork of Borealis — ripples and in-palette bloom under your fingers",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "BorealisTouch.qml"
+  }
+}
