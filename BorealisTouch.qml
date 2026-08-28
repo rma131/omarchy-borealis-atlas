@@ -85,6 +85,9 @@ Item {
   // release inside both is a dismiss, anything beyond either is interaction.
   readonly property int holdMs: 300
   readonly property real dragPx: 12
+  // how much of the screen you must drag to go night -> dawn (1/gain)
+  readonly property real dawnGain: 1.6
+  property bool dawnReturning: false
 
   // pointId occupying each shader slot, -1 when free. A released slot is freed
   // for reuse immediately but keeps its birth stamp, so its ripple plays out.
@@ -156,6 +159,8 @@ Item {
 
   function open(payloadJson) {
     root.opened = true
+    root.dawnReturning = false
+    if (scene) scene.dawn = 0
     root.clearSlots()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -208,6 +213,16 @@ Item {
       property vector4d touch0: Qt.vector4d(0, 0, -1000, 0)
       property vector4d touch1: Qt.vector4d(0, 0, -1000, 0)
       property vector4d touch2: Qt.vector4d(0, 0, -1000, 0)
+
+      // 0 = night, 1 = full dawn. Tracks a vertical drag, then falls back to
+      // night once you let go, so the screensaver's resting state is unchanged.
+      property real dawn: 0
+      Behavior on dawn {
+        NumberAnimation {
+          duration: root.dawnReturning ? 1500 : 130
+          easing.type: root.dawnReturning ? Easing.InOutSine : Easing.OutCubic
+        }
+      }
       fragmentShader: Qt.resolvedUrl("shaders/aurora.frag.qsb")
 
       // All animation gated on the overlay being open: zero work while dismissed.
@@ -238,6 +253,10 @@ Item {
       // still are — the decision is taken when the last one lifts
       property int activeCount: 0
       property int gestureMaxPoints: 0
+      // dawn is driven relative to where the drag began, so touching high on
+      // the screen does not snap the sky to daylight
+      property real dawnStartY: 0
+      property real dawnBase: 0
 
       function norm(pt, axis) {
         return axis === 0 ? pt.x / Math.max(width, 1) : pt.y / Math.max(height, 1)
@@ -255,6 +274,9 @@ Item {
             touchArea.gestureStartX = pt.x
             touchArea.gestureStartY = pt.y
             touchArea.gestureMoved = false
+            touchArea.dawnStartY = pt.y
+            touchArea.dawnBase = scene.dawn
+            root.dawnReturning = false
           }
         }
       }
@@ -267,6 +289,9 @@ Item {
             var dx = pt.x - touchArea.gestureStartX
             var dy = pt.y - touchArea.gestureStartY
             if (Math.sqrt(dx * dx + dy * dy) > root.dragPx) touchArea.gestureMoved = true
+            // dragging up turns the vault toward dawn, down back to night
+            var lift = (touchArea.dawnStartY - pt.y) / Math.max(height, 1)
+            scene.dawn = Math.max(0, Math.min(1, touchArea.dawnBase + lift * root.dawnGain))
           }
         }
       }
@@ -282,6 +307,9 @@ Item {
         var fingers = touchArea.gestureMaxPoints
         touchArea.gestureId = -1
         touchArea.gestureMaxPoints = 0
+        // let the sky fall back to night in its own time
+        root.dawnReturning = true
+        scene.dawn = 0
 
         // one quick tap is the way out; two fingers recolours the sky; holding
         // or dragging means "I am playing" and does neither
