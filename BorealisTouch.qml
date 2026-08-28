@@ -11,6 +11,7 @@
 // past HOLD_MS, or any drag past DRAG_PX, is treated as intent to interact and
 // will not dismiss. Any key still dismisses.
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
 
@@ -89,14 +90,244 @@ Item {
   readonly property real todGain: 1.0
 
   // the clock is the default: whatever time it actually is when you summon it
+  function clockFraction() {
+    var n = new Date()
+    return (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds()) / 86400.0
+  }
+
   function syncTimeOfDay() {
     if (!scene) return
-    var n = new Date()
-    scene.tod = (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds()) / 86400.0
+    root.todReturning = false
+    scene.tod = clockFraction()
+  }
+
+  // scrubbing / inspect state
+  property bool todReturning: false
+  property bool scrubbing: false
+  property int  inspectMode: 0        // 0 off, 1 aurora, 2 moon (event only)
+  property real inspectReveal: 0
+  Behavior on inspectReveal { NumberAnimation { duration: 420; easing.type: Easing.OutCubic } }
+
+  function cycleInspect() {
+    if (!scene) return
+    var m = moonAt(todToDate(scene.tod))
+    if (inspectMode === 0) inspectMode = 1
+    else if (inspectMode === 1) inspectMode = (m.event > 0.5) ? 2 : 0
+    else inspectMode = 0
+    inspectReveal = inspectMode > 0 ? 1 : 0
+    pushSky()
+  }
+
+  function auroraWord(p) {
+    if (p >= 0.75) return "very likely"
+    if (p >= 0.45) return "likely"
+    if (p >= 0.20) return "possible"
+    return "unlikely"
   }
 
   // pointId occupying each shader slot, -1 when free. A released slot is freed
   // for reuse immediately but keeps its birth stamp, so its ripple plays out.
+  // ==== real sky =============================================================
+  // Everything below resolves to six numbers pushed into two uniforms. The
+  // shader does no lookups and holds no arrays — deliberately, since the GLSL
+  // 120 target this compiles to rejects them (see the note atop aurora.frag).
+
+  readonly property string cachePath: Quickshell.env("HOME") + "/.local/state/omarchy/borealis-sky.json"
+  readonly property real cacheMaxAgeMs: 30 * 60 * 1000
+
+  // never quite zero, so a quiet night still has a ghost of aurora
+  readonly property real auroraFloor: {
+    var cfg = root.shell && root.shell.shellConfig
+    var plugins = (cfg && cfg.plugins) || []
+    for (var i = 0; i < plugins.length; i++) {
+      var e = plugins[i]
+      if (e && e.id === "local.borealis-touch" && e.auroraFloor !== undefined) {
+        var v = parseFloat(e.auroraFloor)
+        if (!isNaN(v)) return Math.max(0, Math.min(1, v))
+      }
+    }
+    return 0.12
+  }
+
+  property var loc: null      // { lat, lon, name }
+  property var fc: null       // { t0, code[], precip[], cloud[], temp[] }
+  property var kp: null       // { t0, step, vals[] }
+  property real lastFetchMs: 0
+
+  // ---- moon: pure arithmetic, no network -----------------------------------
+  readonly property real synodicDays: 29.530588853
+  readonly property real anomalisticDays: 27.554549878
+
+  function moonAt(date) {
+    var ref = Date.UTC(2000, 0, 6, 18, 14)           // a known new moon
+    var d = (date.getTime() - ref) / 86400000.0
+    var wrap = function (v, m) { return ((v % m) + m) % m }
+    var phase = wrap(d, synodicDays) / synodicDays               // 0 new, .5 full
+    var anom  = wrap(d - 2.0, anomalisticDays) / anomalisticDays // 0 at perigee
+    var dist  = 1 - 0.0549 * Math.cos(2 * Math.PI * anom)        // ~0.945 .. 1.055
+    var illum = (1 - Math.cos(2 * Math.PI * phase)) / 2
+    // a supermoon is a full moon that also happens near perigee
+    var nearFull = 1 - Math.min(1, Math.abs(phase - 0.5) / 0.055)
+    var nearPeri = 1 - Math.min(1, Math.max(0, dist - 0.955) / 0.030)
+    var superness = Math.max(0, Math.min(1, nearFull * nearPeri))
+    return { phase: phase, dist: dist, illum: illum, event: superness,
+             name: moonName(phase),
+             eventName: superness > 0.5 ? "Supermoon" : "" }
+  }
+
+  function moonName(p) {
+    var n = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous",
+             "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
+    return n[Math.floor(p * 8 + 0.5) % 8]
+  }
+
+  // ---- aurora: geomagnetic latitude vs the auroral oval --------------------
+  function geomagneticLat(lat, lon) {
+    var pLat = 80.7 * Math.PI / 180, pLon = -72.7 * Math.PI / 180
+    var la = lat * Math.PI / 180, lo = lon * Math.PI / 180
+    var sn = Math.sin(la) * Math.sin(pLat)
+           + Math.cos(la) * Math.cos(pLat) * Math.cos(lo - pLon)
+    return Math.asin(Math.max(-1, Math.min(1, sn))) * 180 / Math.PI
+  }
+
+  // The oval's equatorward edge sits near 66.5 - 2*Kp degrees; allow ~8 more
+  // for aurora low on the northern horizon, and smooth the edge.
+  function auroraProbability(kpVal) {
+    if (!loc || kpVal === null || kpVal === undefined) return auroraFloor
+    var mag = Math.abs(geomagneticLat(loc.lat, loc.lon))
+    var p = (mag - (66.5 - 2.0 * kpVal - 8.0)) / 10.0
+    return Math.max(auroraFloor, Math.max(0, Math.min(1, p)))
+  }
+
+  // ---- WMO grouping, matching Omarchy's own weather Model.js ---------------
+  function classifyCode(c) {
+    c = parseInt(String(c), 10)
+    if (c === 0) return { kind: "clear", label: "Clear" }
+    if (c === 1 || c === 2) return { kind: "clear", label: "Partly cloudy" }
+    if (c === 3) return { kind: "cloud", label: "Overcast" }
+    if (c === 45 || c === 48) return { kind: "cloud", label: "Fog" }
+    if (c >= 51 && c <= 57) return { kind: "rain", label: "Drizzle" }
+    if (c === 61 || c === 63 || c === 65) return { kind: "rain", label: "Rain" }
+    if (c === 66 || c === 67) return { kind: "rain", label: "Freezing rain" }
+    if (c >= 71 && c <= 77) return { kind: "snow", label: "Snow" }
+    if (c >= 80 && c <= 82) return { kind: "rain", label: "Showers" }
+    if (c === 85 || c === 86) return { kind: "snow", label: "Snow showers" }
+    if (c >= 95) return { kind: "storm", label: "Thunderstorm" }
+    return { kind: "cloud", label: "Cloudy" }
+  }
+
+  // ---- resolve the whole sky for one moment --------------------------------
+  // todValue is hours/24 from *today's* local midnight and may run past 1, so
+  // dragging into tomorrow reads tomorrow's forecast.
+  function resolveSky(todValue) {
+    var hr = todValue * 24.0
+    var o = { cloud: 0, rain: 0, snow: 0, storm: 0,
+              temp: null, cond: "", kp: null, aurora: auroraFloor, has: false }
+
+    if (fc && fc.code.length > 1) {
+      var x = hr - fc.t0
+      var i = Math.floor(x), f = x - i
+      i = Math.max(0, Math.min(fc.code.length - 2, i))
+      var lp = function (a) { return a[i] + (a[i + 1] - a[i]) * f }
+      o.cloud = Math.max(0, Math.min(1, lp(fc.cloud) / 100))
+      o.temp  = lp(fc.temp)
+      // codes are categorical: take the nearer sample, never the average
+      var k = classifyCode(fc.code[f < 0.5 ? i : i + 1])
+      var inten = Math.max(0, Math.min(1, lp(fc.precip) / 2.5))
+      if (k.kind === "rain")  o.rain = Math.max(0.28, inten)
+      if (k.kind === "snow")  o.snow = Math.max(0.32, inten)
+      if (k.kind === "storm") { o.storm = Math.max(0.5, inten); o.rain = Math.max(o.rain, 0.55) }
+      o.cond = k.label
+      o.has = true
+    }
+
+    if (kp && kp.vals.length > 0) {
+      var best = 0, bd = 1e9
+      for (var j = 0; j < kp.hrs.length; j++) {
+        var dd = Math.abs(kp.hrs[j] - hr)
+        if (dd < bd) { bd = dd; best = j }
+      }
+      if (bd < 6) o.kp = kp.vals[best]      // don't claim Kp far outside the data
+    }
+    o.aurora = auroraProbability(o.kp)
+    return o
+  }
+
+  // ---- push the resolved sky into the two uniforms -------------------------
+  function pushSky() {
+    if (!scene) return
+    var o = resolveSky(scene.tod)
+    var m = moonAt(todToDate(scene.tod))
+    scene.wx = Qt.vector4d(o.cloud, o.rain, o.snow, o.storm)
+    // apparent size swings with distance; a real event adds emphasis on top
+    var emphasis = (1.0 / m.dist - 1.0) * 2.0 + m.event * 0.5
+                   + (root.inspectMode === 2 ? 0.5 : 0.0)
+    scene.astro = Qt.vector4d(m.phase, o.aurora, root.inspectReveal, emphasis)
+  }
+
+  function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
+    var a = String(iso).split("T"), d = a[0].split("-"), t = (a[1] || "0:0").split(":")
+    var dt = new Date(parseInt(d[0], 10), parseInt(d[1], 10) - 1, parseInt(d[2], 10),
+                      parseInt(t[0], 10), parseInt(t[1] || "0", 10), 0)
+    var mid = new Date(); mid.setHours(0, 0, 0, 0)
+    return (dt.getTime() - mid.getTime()) / 3600000.0
+  }
+
+  function hoursFromMidnightUtc(iso) {        // NOAA time_tag, UTC, no suffix
+    var dt = new Date(String(iso).replace(" ", "T") + "Z")
+    var mid = new Date(); mid.setHours(0, 0, 0, 0)
+    return (dt.getTime() - mid.getTime()) / 3600000.0
+  }
+
+  function refreshSky(force) {
+    if (!force && Date.now() - lastFetchMs < cacheMaxAgeMs) return
+    lastFetchMs = Date.now()
+    if (loc) { fetchForecast(); fetchKp() }
+    else if (!locProc.running) locProc.running = true
+  }
+
+  function fetchForecast() {
+    if (!loc || fcProc.running) return
+    fcProc.command = ["curl", "-fsS", "--max-time", "10",
+      "https://api.open-meteo.com/v1/forecast"
+      + "?latitude=" + loc.lat + "&longitude=" + loc.lon
+      + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
+      + "&past_days=1&forecast_days=3&timezone=auto"]
+    fcProc.running = true
+  }
+
+  function fetchKp() {
+    if (kpProc.running) return
+    kpProc.running = true
+  }
+
+  function saveCache() {
+    if (!loc) return
+    var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp }
+    // base64 through argv: no quoting or escaping can go wrong
+    cacheWriteProc.command = ["sh", "-c",
+      "mkdir -p \"$(dirname \"$1\")\"; printf %s \"$2\" | base64 -d > \"$1\"",
+      "sh", cachePath, Qt.btoa(JSON.stringify(payload))]
+    cacheWriteProc.running = true
+  }
+
+  function loadCache(txt) {
+    try {
+      var c = JSON.parse(String(txt || ""))
+      if (!c || !c.loc) return
+      loc = c.loc; fc = c.fc || null; kp = c.kp || null
+      lastFetchMs = c.at || 0
+      pushSky()
+      if (Date.now() - lastFetchMs >= cacheMaxAgeMs) refreshSky(true)
+    } catch (e) { /* a corrupt cache is simply no cache */ }
+  }
+
+  function todToDate(todValue) {
+    var d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return new Date(d.getTime() + todValue * 86400000)
+  }
+
   property var slotIds: [-1, -1, -1]
   property var slotBirth: [0, 0, 0]
 
@@ -185,6 +416,76 @@ Item {
     else root.open("{}")
   }
 
+  // Location by IP, exactly the chain Omarchy's own weather widget uses.
+  Process {
+    id: locProc
+    command: ["curl", "-fsS", "--max-time", "8", "https://wttr.in/?format=j1"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var a = JSON.parse(String(text || "")).nearest_area[0]
+          root.loc = { lat: parseFloat(a.latitude), lon: parseFloat(a.longitude),
+                       name: (a.areaName && a.areaName[0] && a.areaName[0].value) || "" }
+          root.fetchForecast(); root.fetchKp()
+        } catch (e) { /* offline: the scene simply stays as it is */ }
+      }
+    }
+  }
+
+  Process {
+    id: fcProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var h = JSON.parse(String(text || "")).hourly
+          root.fc = { t0: root.hoursFromMidnightLocal(h.time[0]),
+                      code: h.weather_code, precip: h.precipitation,
+                      cloud: h.cloud_cover, temp: h.temperature_2m }
+          root.pushSky(); root.saveCache()
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: kpProc
+    command: ["curl", "-fsS", "--max-time", "8",
+      "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var arr = JSON.parse(String(text || ""))
+          var hrs = [], vals = []
+          for (var i = 0; i < arr.length; i++) {
+            var e = arr[i]
+            if (!e || e.kp === undefined) continue
+            hrs.push(root.hoursFromMidnightUtc(e.time_tag))
+            vals.push(parseFloat(e.kp))
+          }
+          root.kp = { hrs: hrs, vals: vals }
+          root.pushSky(); root.saveCache()
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process { id: cacheWriteProc }
+
+  FileView {
+    path: root.cachePath
+    printErrors: false
+    onLoaded: root.loadCache(text())
+    onLoadFailed: root.refreshSky(true)
+  }
+
+  Timer {
+    interval: root.cacheMaxAgeMs; repeat: true; running: true
+    onTriggered: root.refreshSky(true)
+  }
+
   PanelWindow {
     id: panel
     visible: root.opened
@@ -225,7 +526,16 @@ Item {
       // instead of the animation winding back through the whole day. The shader
       // wraps it.
       property real tod: 0
-      Behavior on tod { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+      Behavior on tod {
+        NumberAnimation {
+          duration: root.todReturning ? 1300 : 110
+          easing.type: root.todReturning ? Easing.InOutSine : Easing.OutCubic
+        }
+      }
+      // the real sky, resolved in QML (see resolveSky)
+      property vector4d wx: Qt.vector4d(0, 0, 0, 0)
+      property vector4d astro: Qt.vector4d(0.5, root.auroraFloor, 0, 0)
+      onTodChanged: root.pushSky()
       fragmentShader: Qt.resolvedUrl("shaders/aurora.frag.qsb")
 
       // All animation gated on the overlay being open: zero work while dismissed.
@@ -266,6 +576,13 @@ Item {
       }
 
       onPressed: function(points) {
+        // A second finger arriving while the first is already dragging is the
+        // inspect tap. The palette gesture cannot collide with it: that one
+        // requires a quick two-finger tap with no movement at all.
+        if (touchArea.activeCount >= 1 && touchArea.gestureMoved) root.cycleInspect()
+        root.todReturning = false
+        root.scrubbing = true
+        readoutHideTimer.stop()
         touchArea.activeCount += points.length
         touchArea.gestureMaxPoints = Math.max(touchArea.gestureMaxPoints, touchArea.activeCount)
         for (var i = 0; i < points.length; i++) {
@@ -309,6 +626,16 @@ Item {
         var fingers = touchArea.gestureMaxPoints
         touchArea.gestureId = -1
         touchArea.gestureMaxPoints = 0
+
+        // Ease back to the real time, the short way round: tod is unbounded, so
+        // the nearest equivalent of "now" may be a whole day up or down.
+        var nowF = root.clockFraction()
+        root.todReturning = true
+        scene.tod = nowF + Math.round(scene.tod - nowF)
+        root.inspectMode = 0
+        root.inspectReveal = 0
+        readoutHideTimer.restart()
+
         // one quick tap is the way out; two fingers recolours the sky; holding
         // or dragging means "I am playing" and does neither
         if (quick && fingers >= 2) root.cyclePalette()
@@ -323,6 +650,49 @@ Item {
           touchArea.gestureId = -1
           touchArea.gestureMaxPoints = 0
         }
+      }
+    }
+
+    Timer {
+      id: readoutHideTimer
+      interval: 1100; repeat: false
+      onTriggered: root.scrubbing = false
+    }
+
+    Text {
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: parent.height * 0.085
+      color: "#eaf0f8"
+      style: Text.Outline
+      styleColor: "#66000000"
+      font.pixelSize: Math.max(15, parent.height * 0.025)
+      font.letterSpacing: 0.5
+      opacity: (root.scrubbing || root.inspectMode > 0) ? 1 : 0
+      Behavior on opacity { NumberAnimation { duration: 280 } }
+      text: {
+        if (!scene) return ""
+        var o = root.resolveSky(scene.tod)
+        var d = root.todToDate(scene.tod)
+        var today = new Date(); today.setHours(0, 0, 0, 0)
+        var dd = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+                             - today.getTime()) / 86400000)
+        var tag = dd === -1 ? "Yesterday " : dd === 1 ? "Tomorrow "
+                : dd > 1 ? "+" + dd + "d " : ""
+        var line = tag + Qt.formatTime(d, "HH:mm")
+        if (o.has) {
+          line += "   " + o.cond
+          if (o.temp !== null) line += "   " + Math.round(o.temp) + "\u00b0"
+        }
+        if (root.inspectMode === 1)
+          line += "   " + (o.kp !== null ? "Kp " + o.kp.toFixed(1) : "Kp \u2014")
+                + ", aurora " + root.auroraWord(o.aurora)
+        else if (root.inspectMode === 2) {
+          var m = root.moonAt(d)
+          line += "   " + m.name + (m.eventName ? "  \u00b7  " + m.eventName : "")
+                + "   " + Math.round(m.illum * 100) + "%"
+        }
+        return line
       }
     }
 

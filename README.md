@@ -72,6 +72,67 @@ The earlier additive-bloom version was free at idle; this one is not. If you wan
 that back, the lever is the reflection tap count (five taps in `main()`), not the
 touch code.
 
+## A real sky
+
+The scene is driven by actual data, resolved in QML and handed to the shader as
+two vec4s. The shader does no lookups and holds no arrays — deliberately, since
+the GLSL 120 target rejects them (see the note atop `aurora.frag`).
+
+**Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
+uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
+`tod` axis. Scrub across the day and the sky changes with the forecast: cloud
+cover closes the deck, rain and snow fall in front of everything, thunder bruises
+the cloud and fires irregular flashes. Location comes from wttr.in by IP, the same
+chain the bar widget uses. Cached to `~/.local/state/omarchy/borealis-sky.json`
+and refreshed at most every 30 minutes. **Offline, everything is zero and the
+scene renders exactly as it would without the feature** — no error state on screen.
+
+**Aurora, only when it is real.** NOAA's Kp forecast is small and *time-indexed at
+3 h resolution*, so it moves with the scrub — unlike the OVATION grid, which is
+923 KB and a single "now" snapshot that cannot answer *at what time tonight*. Your
+geographic position is converted to geomagnetic latitude and compared against the
+auroral oval, whose equatorward edge sits near `66.5 - 2*Kp` degrees:
+
+    prob = smoothstep(0, 10, magLat - (66.5 - 2*Kp - 8))
+
+Never quite zero — `auroraFloor` (default 0.12, settable per-plugin in
+`shell.json`) keeps a ghost of it on quiet nights so the screensaver stays itself.
+
+**Clouds sit on top of the aurora**, because the aurora is 100 km up and the
+weather is not. The curtain colour is held in a variable and fed forward, so the
+cloud deck is lit *from above* by it and the ridge is bathed in it. An overcast
+auroral night reads as glowing cloud, not a hidden aurora.
+
+**The moon is accurate.** Phase from the synodic cycle drives a real terminator
+(`x > cos(2*pi*phase) * sqrt(1-y^2)`, mirrored when waning), so crescent, quarter,
+gibbous and full all render properly, with earthshine as a ghost on the dark limb.
+Its *position* comes from the same phase — the moon's offset from the sun **is**
+its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
+size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
+
+### Gestures
+
+| Gesture | Result |
+|---|---|
+| Quick tap, one finger | dismiss |
+| Quick tap, two fingers (no movement) | next palette |
+| Drag left/right | scrub time of day |
+| **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
+| Press, hold or drag | push the light around |
+| Any key | dismiss |
+
+The two-finger gestures cannot collide: the palette tap requires *no* movement,
+the inspect tap requires the first finger to already be dragging.
+
+Releasing returns the sky to the real time, taking the short way round — `tod` is
+unbounded, so the nearest equivalent of "now" may be a whole day up or down.
+
+**Cost.** Measured back to back on AC: previous build 1048 MHz GPU avg, this one
+1093 MHz — about +4.3% for the whole feature. Precipitation composites in `main()`
+after the branch, so it costs once per pixel rather than five times through the
+water's reflection taps, and every weather block is guarded on a uniform, so clear
+weather pays almost nothing.
+
 ## Developing this plugin: clear the QML cache
 
 Quickshell caches compiled QML in `~/.cache/quickshell/qmlcache`, and it will
@@ -161,6 +222,67 @@ winding backwards through a whole day. The shader wraps it with `fract()`.
 avg, this build at night 1075 MHz — the cycle is free when it is dark. Daytime is
 1080 MHz, because the aurora's three curtain layers switching off very nearly
 pays for the cloud deck switching on.
+
+## A real sky
+
+The scene is driven by actual data, resolved in QML and handed to the shader as
+two vec4s. The shader does no lookups and holds no arrays — deliberately, since
+the GLSL 120 target rejects them (see the note atop `aurora.frag`).
+
+**Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
+uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
+`tod` axis. Scrub across the day and the sky changes with the forecast: cloud
+cover closes the deck, rain and snow fall in front of everything, thunder bruises
+the cloud and fires irregular flashes. Location comes from wttr.in by IP, the same
+chain the bar widget uses. Cached to `~/.local/state/omarchy/borealis-sky.json`
+and refreshed at most every 30 minutes. **Offline, everything is zero and the
+scene renders exactly as it would without the feature** — no error state on screen.
+
+**Aurora, only when it is real.** NOAA's Kp forecast is small and *time-indexed at
+3 h resolution*, so it moves with the scrub — unlike the OVATION grid, which is
+923 KB and a single "now" snapshot that cannot answer *at what time tonight*. Your
+geographic position is converted to geomagnetic latitude and compared against the
+auroral oval, whose equatorward edge sits near `66.5 - 2*Kp` degrees:
+
+    prob = smoothstep(0, 10, magLat - (66.5 - 2*Kp - 8))
+
+Never quite zero — `auroraFloor` (default 0.12, settable per-plugin in
+`shell.json`) keeps a ghost of it on quiet nights so the screensaver stays itself.
+
+**Clouds sit on top of the aurora**, because the aurora is 100 km up and the
+weather is not. The curtain colour is held in a variable and fed forward, so the
+cloud deck is lit *from above* by it and the ridge is bathed in it. An overcast
+auroral night reads as glowing cloud, not a hidden aurora.
+
+**The moon is accurate.** Phase from the synodic cycle drives a real terminator
+(`x > cos(2*pi*phase) * sqrt(1-y^2)`, mirrored when waning), so crescent, quarter,
+gibbous and full all render properly, with earthshine as a ghost on the dark limb.
+Its *position* comes from the same phase — the moon's offset from the sun **is**
+its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
+size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
+
+### Gestures
+
+| Gesture | Result |
+|---|---|
+| Quick tap, one finger | dismiss |
+| Quick tap, two fingers (no movement) | next palette |
+| Drag left/right | scrub time of day |
+| **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
+| Press, hold or drag | push the light around |
+| Any key | dismiss |
+
+The two-finger gestures cannot collide: the palette tap requires *no* movement,
+the inspect tap requires the first finger to already be dragging.
+
+Releasing returns the sky to the real time, taking the short way round — `tod` is
+unbounded, so the nearest equivalent of "now" may be a whole day up or down.
+
+**Cost.** Measured back to back on AC: previous build 1048 MHz GPU avg, this one
+1093 MHz — about +4.3% for the whole feature. Precipitation composites in `main()`
+after the branch, so it costs once per pixel rather than five times through the
+water's reflection taps, and every weather block is guarded on a uniform, so clear
+weather pays almost nothing.
 
 ## Developing this plugin: clear the QML cache
 
