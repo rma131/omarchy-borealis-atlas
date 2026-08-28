@@ -129,6 +129,96 @@ not notice** — it serves its cached QML instead. Clear the cache and restart:
     rm -rf ~/.cache/quickshell ~/.cache/qtshadercache-*
     omarchy-restart-shell
 
+### The time-of-day drag
+
+Drag **left to right** to run the clock forward, right to left to run it back.
+The whole 24 h cycle is covered: full night → dawn → full daylight → afternoon →
+dusk → night, with the usual transitions between.
+
+When you summon the overlay it **seeds itself from the real clock**, so it opens
+on whatever time of day it actually is. From there the drag is measured relative
+to where it began — touching near an edge does not jump the sky to a different
+hour — and dragging the full width of the screen advances one whole day
+(`todGain`). Where you let go is where it stays; the next summon re-syncs.
+
+What moves with the hour:
+
+| | |
+|---|---|
+| Sun | rises east, arcs overhead at noon, sets west; reddens near the horizon |
+| Moon | rides the opposite half of the clock, fading out in daylight |
+| Sky | night palette → golden-hour band → daylight blue |
+| Stars | night only, and the vault turns slowly through the night |
+| Aurora, meteors | night only — they fade as the sun approaches the horizon |
+| Clouds | day and golden hour, lit by the sun's angle; held at zero at night |
+| Ridge | silhouette by night, lit green by day |
+
+`tod` is deliberately **unbounded** on the QML side: letting it run past 1 means a
+drag through midnight keeps going forward, instead of the easing animation
+winding backwards through a whole day. The shader wraps it with `fract()`.
+
+**Cost.** Measured back to back on AC: the previous build at night 1076 MHz GPU
+avg, this build at night 1075 MHz — the cycle is free when it is dark. Daytime is
+1080 MHz, because the aurora's three curtain layers switching off very nearly
+pays for the cloud deck switching on.
+
+## Developing this plugin: clear the QML cache
+
+Quickshell caches compiled QML in `~/.cache/quickshell/qmlcache`, and it will
+happily serve a **stale** component after you edit a plugin. Symptom: your edits
+appear to do nothing at all — not a wrong result, no result, as if the file were
+never touched. Clearing `~/.cache/qtshadercache-*` alone is not enough.
+
+    rm -rf ~/.cache/quickshell ~/.cache/qtshadercache-*
+    omarchy-restart-shell
+
+Also note `open()` calls `clearSlots()`. If you pin a touch slot to a literal for
+testing, pin it *inside* `clearSlots()` — a pinned property default is wiped the
+moment the overlay is summoned, which looks exactly like the uniform never
+arriving.
+
+## Rebuilding the shader
+
+`qsb` ships in `qt6-shadertools` but is not on `PATH`:
+
+    export PATH="$PATH:/usr/lib/qt6/bin"
+    qsb --glsl "100es,120,150" --hlsl 50 --msl 12 \
+        -o shaders/aurora.frag.qsb shaders/aurora.frag
+
+Those targets match upstream's. Tuning lives at the top of `aurora.frag`:
+`PUSH_AMP`/`PUSH_SIGMA` (how hard and how tightly a finger shoves the light),
+`COMPRESS` (divergence into brightness), `WAVE_AMP`/`WAVE_K` (ring depth and
+spacing), and `RELAX_TAU`/`RELAX_OMEGA`/`RELAX_LIFE` (the spring-back). **Never introduce a const array or a
+dynamically-indexed array**: the GLSL 120 target rejects them at runtime with
+`C7516: OpenGL does not allow constant arrays` and a blank overlay, while qsb
+itself compiles clean. That is why the touch slots are three separate `vec4`
+uniforms rather than an array, mirroring how upstream passes its palette.
+
+## Palette
+
+As upstream — set `palette` on this plugin's entry in `~/.config/omarchy/shell.json`
+(`aurora` | `ember` | `gold` | `nord` | `ice`):
+
+    { "id": "local.borealis-touch", "palette": "nord" }
+
+## History
+
+    git -C ~/.config/omarchy/plugins/local.borealis-touch log --oneline --decorate
+
+`main` carries everything: the night interaction and the dawn drag. The
+night-only build — repulsion field, spring-back, palette cycle, no dawn — is kept
+at the tag **`working-night`**, which is the thing to go back to if the dawn work
+ever needs undoing:
+
+    git switch -d working-night     # look at it
+    git switch -c night-only working-night   # or branch from it
+
+Whenever you move between these, the shader on disk changes and **Quickshell will
+not notice** — it serves its cached QML instead. Clear the cache and restart:
+
+    rm -rf ~/.cache/quickshell ~/.cache/qtshadercache-*
+    omarchy-restart-shell
+
 ### The dawn drag
 
 A vertical drag turns the celestial vault; up goes toward dawn, down back to
