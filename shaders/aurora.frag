@@ -34,6 +34,8 @@ layout(std140, binding = 0) uniform buf {
     vec4 touch0;
     vec4 touch1;
     vec4 touch2;
+    // 0 = night as shipped, 1 = full dawn. Driven by dragging up/down.
+    float dawn;
 };
 
 const float WATERLINE = 0.82;
@@ -208,12 +210,29 @@ vec3 meteors(vec2 uv, float t, float aspect) {
 vec3 upperScene(vec2 uv, float t, vec4 fp) {
   float aspect = resolution.x / resolution.y;
 
-  // sky gradient
+  // sky gradient, warmed toward a dawn horizon as the vault turns
   vec3 col = skyBase.rgb + skyAmp.rgb * (1.0 - uv.y);
+  if (dawn > 0.0) {
+    vec3 dsky = mix(vec3(0.05, 0.09, 0.24), vec3(0.98, 0.54, 0.26),
+                    smoothstep(0.05, 0.82, uv.y));
+    col = mix(col, dsky, dawn);
+  }
+  // stars and meteors wash out as the sky lightens
+  float starAmt = 1.0 - smoothstep(0.10, 0.62, dawn);
 
   // starfield (hash gather; ~14px cells, kept above 0.7 height)
-  if (uv.y < 0.7) {
-    vec2 g = uv * resolution / 14.0;
+  if (uv.y < 0.7 && starAmt > 0.0) {
+    // the celestial vault turns about a pole below the horizon
+    vec2 suv = uv;
+    if (dawn > 0.0) {
+      vec2 piv = vec2(0.5, 1.08);
+      vec2 q = (uv - piv) * vec2(aspect, 1.0);
+      float a = -dawn * 0.40;
+      float ca = cos(a), sa = sin(a);
+      q = vec2(q.x * ca - q.y * sa, q.x * sa + q.y * ca);
+      suv = piv + vec2(q.x / aspect, q.y);
+    }
+    vec2 g = suv * resolution / 14.0;
     vec2 cell = floor(g);
     float h = hash21(cell);
     if (h > 0.55) {
@@ -223,21 +242,33 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
       float twk = 0.55 + 0.45 * sin(t * (1.5 + 2.5 * hash21(cell + 5.2))
                                     + 6.28318 * hash21(cell + 9.4));
       col += smoothstep(1.2, 0.0, d) * mag * twk * 0.78 * vec3(0.85, 0.9, 1.0)
-              * (1.0 + fp.w * 1.6);
+              * (1.0 + fp.w * 1.6) * starAmt;
     }
   }
 
   // crescent moon: pale disc minus offset disc, gentle halo; occludes stars
-  {
-    vec2 mp = (uv - vec2(0.78, 0.16)) * vec2(aspect, 1.0);
+  float moonAmt = 1.0 - smoothstep(0.30, 0.88, dawn);
+  if (moonAmt > 0.0) {
+    vec2 mp = (uv - (vec2(0.78, 0.16) + dawn * vec2(0.10, 0.38))) * vec2(aspect, 1.0);
     float r = 0.055;
     float d1 = length(mp);
     float d2 = length(mp - vec2(0.020, -0.009));
     float crescent = clamp(smoothstep(r, r - 0.004, d1)
                          - smoothstep(r * 1.04, r * 1.04 - 0.004, d2), 0.0, 1.0);
     vec3 moonCol = vec3(0.95, 0.93, 0.85);
-    col = mix(col, moonCol, crescent);
-    col += moonCol * exp(-d1 * 34.0) * 0.10;
+    col = mix(col, moonCol, crescent * moonAmt);
+    col += moonCol * exp(-d1 * 34.0) * 0.10 * moonAmt;
+  }
+
+  // a far sun climbing out of the ridge on the other side
+  float sunAmt = smoothstep(0.18, 0.62, dawn);
+  if (sunAmt > 0.0) {
+    vec2 sp = (uv - vec2(0.28, 1.10 - dawn * 0.82)) * vec2(aspect, 1.0);
+    float sd = length(sp);
+    vec3 sunCol = vec3(1.0, 0.86, 0.60);
+    col += sunCol * exp(-sd *  9.0) * 0.30 * sunAmt;   // broad haze
+    col += sunCol * exp(-sd * 42.0) * 0.55 * sunAmt;   // tight halo
+    col = mix(col, vec3(1.0, 0.97, 0.90), smoothstep(0.030, 0.025, sd) * sunAmt);
   }
 
   // three curtain layers, aurora.py self.layers
@@ -253,10 +284,10 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
            + curtain(cuv, t, 0.42, 0.32, 0.55,
                      vec3(1.7, 3.3, 6.5), vec3(0.04, 0.025, 0.012),
                      vec3(0.11, -0.23, 0.17), 31.0, 0.9);
-  col += cur * fp.z;
+  col += cur * fp.z * (1.0 - smoothstep(0.12, 0.72, dawn));
 
   // meteors streak over the curtains
-  col += meteors(uv, t, aspect);
+  col += meteors(uv, t, aspect) * starAmt;
 
   // forested ridge standing on the waterline
   float fx = uv.x;
