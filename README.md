@@ -135,7 +135,13 @@ the screen does not snap to daylight. Let go and it eases back to night over
 ~1.5 s, so the resting screensaver is unchanged.
 
 **Clouds.** A wispy deck fades in with dawn, stretched hard in x so the bands run
-parallel to the aurora curtains — texture, not weather. How it is lit depends on
+parallel to the aurora curtains — texture, not weather. It drifts on a wind that
+complements the aurora rather than fighting it: the brightest curtain travels
+left at ~0.030 uv/s (its ray term `sin(fx*23 + t*0.7)` moves at `-rayS/rayF`), so
+the deck goes the same way at about a third of that, with the upper layer lagging
+the lower for parallax and a slow swell so it breathes instead of sliding as a
+rigid sheet. Measured by isolating the cloud field and correlating two frames 8 s
+apart: **+163 px, or +0.0106 uv/s leftward**, against +0.0105 predicted. How it is lit depends on
 where the sun sits relative to the horizon: grazing gives red underlight, higher
 gives gold, and cloud far from the sun stays cool. The deck is displaced by the
 touch field exactly like the curtains, and compression concentrates its highlight,
