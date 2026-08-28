@@ -116,13 +116,16 @@ size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 |---|---|
 | Quick tap, one finger | dismiss |
 | Quick tap, two fingers (no movement) | next palette |
-| Drag left/right | scrub time of day |
+| Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
 | **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
 | Press, hold or drag | push the light around |
 | Any key | dismiss |
 
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
+
+While scrubbing, a readout names the moment: condition and temperature on top,
+and the day being explored — `Saturday 29 August` — smaller and quieter beneath.
 
 Releasing returns the sky to the real time, taking the short way round — `tod` is
 unbounded, so the nearest equivalent of "now" may be a whole day up or down.
@@ -267,13 +270,16 @@ size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 |---|---|
 | Quick tap, one finger | dismiss |
 | Quick tap, two fingers (no movement) | next palette |
-| Drag left/right | scrub time of day |
+| Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
 | **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
 | Press, hold or drag | push the light around |
 | Any key | dismiss |
 
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
+
+While scrubbing, a readout names the moment: condition and temperature on top,
+and the day being explored — `Saturday 29 August` — smaller and quieter beneath.
 
 Releasing returns the sky to the real time, taking the short way round — `tod` is
 unbounded, so the nearest equivalent of "now" may be a whole day up or down.

@@ -102,6 +102,7 @@ Item {
   }
 
   // scrubbing / inspect state
+  property real sceneH: 1080          // panel height, for readout sizing
   property bool todReturning: false
   property bool scrubbing: false
   property int  inspectMode: 0        // 0 off, 1 aurora, 2 moon (event only)
@@ -496,6 +497,9 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
+    onHeightChanged: root.sceneH = height
+    Component.onCompleted: root.sceneH = height
+
     ShaderEffect {
       id: scene
       anchors.fill: parent
@@ -608,9 +612,10 @@ Item {
             var dx = pt.x - touchArea.gestureStartX
             var dy = pt.y - touchArea.gestureStartY
             if (Math.sqrt(dx * dx + dy * dy) > root.dragPx) touchArea.gestureMoved = true
-            // dragging right runs the day forward, left runs it back
+            // Inverted on purpose: you grab the sky and pull it, the way you
+            // scroll content. Dragging left pulls later hours in from the right.
             var slide = (pt.x - touchArea.todStartX) / Math.max(width, 1)
-            scene.tod = touchArea.todBase + slide * root.todGain
+            scene.tod = touchArea.todBase - slide * root.todGain
           }
         }
       }
@@ -659,17 +664,21 @@ Item {
       onTriggered: root.scrubbing = false
     }
 
-    Text {
+    Column {
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
-      anchors.bottomMargin: parent.height * 0.085
+      anchors.bottomMargin: parent.height * 0.075
+      spacing: parent.height * 0.008
+      opacity: (root.scrubbing || root.inspectMode > 0) ? 1 : 0
+      Behavior on opacity { NumberAnimation { duration: 280 } }
+
+    Text {
+      anchors.horizontalCenter: parent.horizontalCenter
       color: "#eaf0f8"
       style: Text.Outline
       styleColor: "#66000000"
-      font.pixelSize: Math.max(15, parent.height * 0.025)
+      font.pixelSize: Math.max(15, root.sceneH * 0.025)
       font.letterSpacing: 0.5
-      opacity: (root.scrubbing || root.inspectMode > 0) ? 1 : 0
-      Behavior on opacity { NumberAnimation { duration: 280 } }
       text: {
         if (!scene) return ""
         var o = root.resolveSky(scene.tod)
@@ -694,6 +703,20 @@ Item {
         }
         return line
       }
+    }
+
+    // the day being explored, quieter than the line above it
+    Text {
+      anchors.horizontalCenter: parent.horizontalCenter
+      color: "#eaf0f8"
+      opacity: 0.62
+      style: Text.Outline
+      styleColor: "#66000000"
+      font.pixelSize: Math.max(11, root.sceneH * 0.0165)
+      font.letterSpacing: 0.4
+      text: scene ? Qt.formatDate(root.todToDate(scene.tod), "dddd d MMMM") : ""
+    }
+
     }
 
     Item {
