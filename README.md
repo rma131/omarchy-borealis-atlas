@@ -80,11 +80,14 @@ the GLSL 120 target rejects them (see the note atop `aurora.frag`).
 
 **Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
 uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
-`tod` axis. That window is **yesterday 00:00 to three days out**, and the scrub is
-clamped to it, derived from the data rather than hard-coded. So you can look back
-at yesterday but no further: there is no data for the day before, and the drag
-will not pretend there is. Raise `past_days` in `fetchForecast()` if you want more
-history. Scrub across the day and the sky changes with the forecast: cloud
+`tod` axis. `past_days=7&forecast_days=16` (16 is the API maximum) gives **552
+hourly samples across 23 days** — a week back, a fortnight forward — for about
+21 KB. The scrub is clamped to that window, derived from the data rather than
+hard-coded, and `resolveSky` refuses to report weather outside it, so the drag
+never invents a forecast it does not hold.
+
+Note the Kp forecast only runs ~3 days ahead. Beyond that the aurora falls back to
+its floor and the readout shows `Kp —` rather than guessing. Scrub across the day and the sky changes with the forecast: cloud
 cover closes the deck, rain and snow fall in front of everything, thunder bruises
 the cloud and fires irregular flashes. Location comes from wttr.in by IP, the same
 chain the bar widget uses. Cached to `~/.local/state/omarchy/borealis-sky.json`
@@ -128,8 +131,14 @@ size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
 
-While scrubbing, a readout names the moment: condition and temperature on top,
-and the day being explored — `Saturday 29 August` — smaller and quieter beneath.
+The readout stays hidden until a scrub actually begins — resting a finger on the
+glass leaves the sky clean. Once moving, it names the moment: condition and
+temperature on top, and the day being explored — `Saturday 29 August` — smaller
+and quieter beneath.
+
+`todGain` sets how many days a full-width drag covers (2.5). At that rate a pixel
+is about two minutes of forecast, far finer than the hourly data, while the whole
+23-day window is nine swipes wide.
 
 Releasing returns the sky to the real time, taking the short way round — `tod` is
 unbounded, so the nearest equivalent of "now" may be a whole day up or down.
@@ -238,11 +247,14 @@ the GLSL 120 target rejects them (see the note atop `aurora.frag`).
 
 **Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
 uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
-`tod` axis. That window is **yesterday 00:00 to three days out**, and the scrub is
-clamped to it, derived from the data rather than hard-coded. So you can look back
-at yesterday but no further: there is no data for the day before, and the drag
-will not pretend there is. Raise `past_days` in `fetchForecast()` if you want more
-history. Scrub across the day and the sky changes with the forecast: cloud
+`tod` axis. `past_days=7&forecast_days=16` (16 is the API maximum) gives **552
+hourly samples across 23 days** — a week back, a fortnight forward — for about
+21 KB. The scrub is clamped to that window, derived from the data rather than
+hard-coded, and `resolveSky` refuses to report weather outside it, so the drag
+never invents a forecast it does not hold.
+
+Note the Kp forecast only runs ~3 days ahead. Beyond that the aurora falls back to
+its floor and the readout shows `Kp —` rather than guessing. Scrub across the day and the sky changes with the forecast: cloud
 cover closes the deck, rain and snow fall in front of everything, thunder bruises
 the cloud and fires irregular flashes. Location comes from wttr.in by IP, the same
 chain the bar widget uses. Cached to `~/.local/state/omarchy/borealis-sky.json`
@@ -286,8 +298,14 @@ size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
 
-While scrubbing, a readout names the moment: condition and temperature on top,
-and the day being explored — `Saturday 29 August` — smaller and quieter beneath.
+The readout stays hidden until a scrub actually begins — resting a finger on the
+glass leaves the sky clean. Once moving, it names the moment: condition and
+temperature on top, and the day being explored — `Saturday 29 August` — smaller
+and quieter beneath.
+
+`todGain` sets how many days a full-width drag covers (2.5). At that rate a pixel
+is about two minutes of forecast, far finer than the hourly data, while the whole
+23-day window is nine swipes wide.
 
 Releasing returns the sky to the real time, taking the short way round — `tod` is
 unbounded, so the nearest equivalent of "now" may be a whole day up or down.
