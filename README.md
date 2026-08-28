@@ -110,3 +110,30 @@ As upstream — set `palette` on this plugin's entry in `~/.config/omarchy/shell
 (`aurora` | `ember` | `gold` | `nord` | `ice`):
 
     { "id": "local.borealis-touch", "palette": "nord" }
+
+## Branches
+
+    git -C ~/.config/omarchy/plugins/local.borealis-touch log --oneline --all --decorate
+
+| Branch | What |
+|---|---|
+| `main` (tag `working-night`) | night-only: repulsion field, spring-back, palette cycle |
+| `dawn-vault` | adds the night→dawn drag (sun, setting moon, rotating stars, no aurora) |
+
+Switching branches changes the shader on disk, and **Quickshell will not pick that
+up on its own** — clear its QML cache and restart the shell:
+
+    git switch main          # or: git switch dawn-vault
+    rm -rf ~/.cache/quickshell ~/.cache/qtshadercache-*
+    omarchy-restart-shell
+
+### The dawn drag (`dawn-vault` only)
+
+A vertical drag turns the celestial vault; up goes toward dawn, down back to
+night. It is measured **relative to where the drag began**, so touching high on
+the screen does not snap to daylight. Let go and it eases back to night over
+~1.5 s, so the resting screensaver is unchanged.
+
+It costs nothing while it is night — every addition sits behind `if (dawn > 0.0)`,
+which is uniform across the draw. Tunables: `dawnGain` in the QML (how much drag
+covers the full range) and the `dawn`-keyed constants in `upperScene`.
