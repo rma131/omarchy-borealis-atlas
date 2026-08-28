@@ -150,6 +150,14 @@ Item {
     return 0.12
   }
 
+  // How far the scrub may run, in tod units (days from today's midnight),
+  // derived from the data itself so it follows the fetch parameters. With
+  // past_days=1 the earliest real hour is yesterday 00:00 — there is no data
+  // for the day before that, so the drag must not pretend otherwise.
+  readonly property real todMin: (fc && fc.code.length) ? fc.t0 / 24.0 : -1.0
+  readonly property real todMax: (fc && fc.code.length)
+                                 ? (fc.t0 + fc.code.length - 1) / 24.0 : 2.95
+
   property var loc: null      // { lat, lon, name }
   property var fc: null       // { t0, code[], precip[], cloud[], temp[] }
   property var kp: null       // { t0, step, vals[] }
@@ -225,8 +233,8 @@ Item {
     var o = { cloud: 0, rain: 0, snow: 0, storm: 0,
               temp: null, cond: "", kp: null, aurora: auroraFloor, has: false }
 
-    if (fc && fc.code.length > 1) {
-      var x = hr - fc.t0
+    var x = fc ? hr - fc.t0 : -1
+    if (fc && fc.code.length > 1 && x >= 0 && x <= fc.code.length - 1) {
       var i = Math.floor(x), f = x - i
       i = Math.max(0, Math.min(fc.code.length - 2, i))
       var lp = function (a) { return a[i] + (a[i + 1] - a[i]) * f }
@@ -615,7 +623,15 @@ Item {
             // Inverted on purpose: you grab the sky and pull it, the way you
             // scroll content. Dragging left pulls later hours in from the right.
             var slide = (pt.x - touchArea.todStartX) / Math.max(width, 1)
-            scene.tod = touchArea.todBase - slide * root.todGain
+            var want = touchArea.todBase - slide * root.todGain
+            var lim = Math.max(root.todMin, Math.min(root.todMax, want))
+            if (lim !== want) {
+              // Re-anchor at the edge, so reversing the drag responds straight
+              // away instead of first having to unwind the overshoot.
+              touchArea.todStartX = pt.x
+              touchArea.todBase = lim
+            }
+            scene.tod = lim
           }
         }
       }
@@ -686,8 +702,8 @@ Item {
         var today = new Date(); today.setHours(0, 0, 0, 0)
         var dd = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
                              - today.getTime()) / 86400000)
-        var tag = dd === -1 ? "Yesterday " : dd === 1 ? "Tomorrow "
-                : dd > 1 ? "+" + dd + "d " : ""
+        // beyond tomorrow the date line underneath names the day already
+        var tag = dd === -1 ? "Yesterday " : dd === 1 ? "Tomorrow " : ""
         var line = tag + Qt.formatTime(d, "HH:mm")
         if (o.has) {
           line += "   " + o.cond

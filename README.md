@@ -80,7 +80,11 @@ the GLSL 120 target rejects them (see the note atop `aurora.frag`).
 
 **Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
 uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
-`tod` axis. Scrub across the day and the sky changes with the forecast: cloud
+`tod` axis. That window is **yesterday 00:00 to three days out**, and the scrub is
+clamped to it, derived from the data rather than hard-coded. So you can look back
+at yesterday but no further: there is no data for the day before, and the drag
+will not pretend there is. Raise `past_days` in `fetchForecast()` if you want more
+history. Scrub across the day and the sky changes with the forecast: cloud
 cover closes the deck, rain and snow fall in front of everything, thunder bruises
 the cloud and fires irregular flashes. Location comes from wttr.in by IP, the same
 chain the bar widget uses. Cached to `~/.local/state/omarchy/borealis-sky.json`
@@ -234,7 +238,11 @@ the GLSL 120 target rejects them (see the note atop `aurora.frag`).
 
 **Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
 uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
-`tod` axis. Scrub across the day and the sky changes with the forecast: cloud
+`tod` axis. That window is **yesterday 00:00 to three days out**, and the scrub is
+clamped to it, derived from the data rather than hard-coded. So you can look back
+at yesterday but no further: there is no data for the day before, and the drag
+will not pretend there is. Raise `past_days` in `fetchForecast()` if you want more
+history. Scrub across the day and the sky changes with the forecast: cloud
 cover closes the deck, rain and snow fall in front of everything, thunder bruises
 the cloud and fires irregular flashes. Location comes from wttr.in by IP, the same
 chain the bar widget uses. Cached to `~/.local/state/omarchy/borealis-sky.json`
