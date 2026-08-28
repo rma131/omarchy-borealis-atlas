@@ -34,11 +34,14 @@ layout(std140, binding = 0) uniform buf {
     vec4 touch0;
     vec4 touch1;
     vec4 touch2;
-    // 0 = night as shipped, 1 = full dawn. Driven by dragging up/down.
-    float dawn;
+    // Time of day as a fraction of 24 h: 0.00 midnight, 0.25 sunrise,
+    // 0.50 noon, 0.75 sunset. Seeded from the real clock, dragged left to right.
+    float tod;
 };
 
 const float WATERLINE = 0.82;
+const float HORIZON  = 0.795;   // where sun and moon cross
+const float SUN_ARC  = 0.62;    // how high the sun climbs at noon
 
 // piecewise-linear ramp, aurora.py ramp()/np.interp — chained clamped mixes
 // reproduce the 6-stop interp exactly (each clamp saturates before the next
@@ -87,9 +90,9 @@ vec3 paletteSig() {
   return c / max(max(max(c.r, c.g), c.b), 0.001);
 }
 
-// Wispy dawn deck. Stretched hard in x so the bands run parallel to the
+// Wispy cloud deck. Stretched hard in x so the bands run parallel to the
 // curtains — texture rather than weather. Two octaves is plenty at this
-// opacity, and it only ever runs while dawn > 0.
+// opacity, and it is held at zero through the night.
 //
 // Wind. The brightest curtain drifts left at ~0.030 uv/s (its ray term is
 // sin(fx*23 + t*0.7), which travels at -rayS/rayF), so the deck goes the same
@@ -241,33 +244,51 @@ vec3 meteors(vec2 uv, float t, float aspect) {
 vec3 upperScene(vec2 uv, float t, vec4 fp) {
   float aspect = resolution.x / resolution.y;
 
-  // sky gradient, warmed toward a dawn horizon as the vault turns
+  // ---- where the sun and moon are, and therefore what kind of sky this is --
+  // dayPhase runs 0 at sunrise to 1 at sunset; outside that the sine goes
+  // negative and both bodies simply sit below the horizon, so the cycle needs
+  // no special-casing for night.
+  // tod is unbounded (QML lets it run past 1 so a drag through midnight does
+  // not animate backwards through the whole day); wrap it for positions.
+  float td        = fract(tod);
+  float dayPhase  = (td - 0.25) * 2.0;
+  float sunAlt    = sin(dayPhase * 3.14159265);
+  vec2  sunUV     = vec2(mix(0.10, 0.90, dayPhase), HORIZON - sunAlt * SUN_ARC);
+
+  float moonPhase = (fract(td + 0.5) - 0.25) * 2.0;
+  float moonAlt   = sin(moonPhase * 3.14159265);
+  vec2  moonUV    = vec2(mix(0.10, 0.90, moonPhase), HORIZON - moonAlt * SUN_ARC);
+
+  float day   = smoothstep(-0.04, 0.32, sunAlt);        // 1 in full daylight
+  float gold  = exp(-sunAlt * sunAlt * 26.0);           // the golden-hour band
+  float night = 1.0 - smoothstep(-0.20, 0.04, sunAlt);  // 1 in full night
+  vec3  sig   = paletteSig();
+
+  // sky: night as shipped, warmed through the golden hour, opening out to day
   vec3 col = skyBase.rgb + skyAmp.rgb * (1.0 - uv.y);
-  vec3 sig = vec3(1.0);
-  vec2 sunUV = vec2(0.28, 1.10 - dawn * 0.82);
-  if (dawn > 0.0) {
-    sig = paletteSig();
-    vec3 zen0 = vec3(0.06, 0.10, 0.26);
+  if (day > 0.0 || gold > 0.002) {
+    vec3 zen0 = vec3(0.07, 0.12, 0.30);
     // multiply rather than blend toward the hue: shifts colour, keeps luminance
-    vec3 zen  = mix(zen0, zen0 * (0.45 + 0.95 * sig), PALETTE_TINT);
-    vec3 dsky = mix(zen, vec3(0.98, 0.54, 0.26), smoothstep(0.05, 0.82, uv.y));
-    col = mix(col, dsky, dawn);
+    vec3 zenT = mix(zen0, zen0 * (0.45 + 0.95 * sig), PALETTE_TINT);
+    vec3 goldSky = mix(zenT, vec3(0.98, 0.54, 0.26), smoothstep(0.05, 0.82, uv.y));
+    vec3 daySky  = mix(vec3(0.22, 0.45, 0.86), vec3(0.74, 0.86, 0.96),
+                       smoothstep(0.0, 0.85, uv.y));
+    col = mix(col, daySky, day);
+    col = mix(col, goldSky, gold * 0.80);
   }
-  // stars and meteors wash out as the sky lightens
-  float starAmt = 1.0 - smoothstep(0.10, 0.62, dawn);
+
+  float starAmt = night;
 
   // starfield (hash gather; ~14px cells, kept above 0.7 height)
   if (uv.y < 0.7 && starAmt > 0.0) {
-    // the celestial vault turns about a pole below the horizon
-    vec2 suv = uv;
-    if (dawn > 0.0) {
-      vec2 piv = vec2(0.5, 1.08);
-      vec2 q = (uv - piv) * vec2(aspect, 1.0);
-      float a = -dawn * 0.40;
-      float ca = cos(a), sa = sin(a);
-      q = vec2(q.x * ca - q.y * sa, q.x * sa + q.y * ca);
-      suv = piv + vec2(q.x / aspect, q.y);
-    }
+    // the vault turns through the night rather than snapping between states
+    vec2 piv = vec2(0.5, 1.08);
+    vec2 q = (uv - piv) * vec2(aspect, 1.0);
+    float a = -tod * 1.10;
+    float ca = cos(a), sa = sin(a);
+    q = vec2(q.x * ca - q.y * sa, q.x * sa + q.y * ca);
+    vec2 suv = piv + vec2(q.x / aspect, q.y);
+
     vec2 g = suv * resolution / 14.0;
     vec2 cell = floor(g);
     float h = hash21(cell);
@@ -282,10 +303,10 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     }
   }
 
-  // crescent moon: pale disc minus offset disc, gentle halo; occludes stars
-  float moonAmt = 1.0 - smoothstep(0.30, 0.88, dawn);
+  // crescent moon, riding the opposite half of the clock from the sun
+  float moonAmt = smoothstep(-0.06, 0.08, moonAlt) * (1.0 - day * 0.85);
   if (moonAmt > 0.0) {
-    vec2 mp = (uv - (vec2(0.78, 0.16) + dawn * vec2(0.10, 0.38))) * vec2(aspect, 1.0);
+    vec2 mp = (uv - moonUV) * vec2(aspect, 1.0);
     float r = 0.055;
     float d1 = length(mp);
     float d2 = length(mp - vec2(0.020, -0.009));
@@ -296,35 +317,37 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     col += moonCol * exp(-d1 * 34.0) * 0.10 * moonAmt;
   }
 
-  // Dawn cloud deck. Displaced by the touch field exactly like the curtains, so
+  // Cloud deck. Displaced by the touch field exactly like the curtains, so
   // pushing the sky slides the sunlit highlight across the cloud instead of the
-  // cloud simply moving under a fixed glow.
-  if (dawn > 0.0) {
+  // cloud simply moving under a fixed glow. Held at zero through the night, so
+  // the night scene costs exactly what it did before the cycle existed.
+  float cloudAmt = clamp(0.85 * day + 0.55 * gold, 0.0, 1.0);
+  if (cloudAmt > 0.02) {
     vec2 puv = uv - fp.xy;
     float cd = cloudField(puv, t);
     cd = smoothstep(0.54, 0.88, cd);
     cd *= smoothstep(0.16, 0.36, uv.y) * (1.0 - smoothstep(0.60, 0.80, uv.y));
     if (cd > 0.0) {
-      // how the deck is lit depends on where the sun sits relative to the
-      // horizon: low and grazing gives red underlight, higher gives gold
-      float alt  = clamp((0.74 - sunUV.y) / 0.42, 0.0, 1.0);
+      // grazing sun gives red underlight, high sun gives white
       float prox = exp(-length((puv - sunUV) * vec2(aspect, 1.0)) * 2.4);
-      vec3 lit    = mix(vec3(1.00, 0.42, 0.26), vec3(1.00, 0.84, 0.62), alt);
-      vec3 shade0 = mix(vec3(0.20, 0.19, 0.32), vec3(0.34, 0.34, 0.42), alt);
+      vec3 lit    = mix(vec3(1.00, 0.42, 0.26), vec3(1.00, 0.97, 0.93),
+                        smoothstep(0.0, 0.50, sunAlt));
+      vec3 shade0 = mix(vec3(0.20, 0.19, 0.32), vec3(0.55, 0.60, 0.70), day);
       vec3 shade  = mix(shade0, shade0 * (0.45 + 0.95 * sig), PALETTE_TINT);
       // compression concentrates the highlight, same as it does the aurora
       vec3 cc = mix(shade, lit, clamp(prox * fp.z, 0.0, 1.0));
-      col = mix(col, cc, cd * dawn * 0.55);
+      col = mix(col, cc, cd * cloudAmt * 0.55);
     }
   }
 
-  // a far sun climbing out of the ridge on the other side
-  float sunAmt = smoothstep(0.18, 0.62, dawn);
+  // the sun itself, once it clears the horizon
+  float sunAmt = smoothstep(-0.10, 0.01, sunAlt);
   if (sunAmt > 0.0) {
     vec2 sp = (uv - sunUV) * vec2(aspect, 1.0);
     float sd = length(sp);
-    vec3 sunCol = mix(vec3(1.0, 0.86, 0.60),
-                      vec3(1.0, 0.86, 0.60) * (0.72 + 0.46 * sig), 0.15);
+    vec3 sunCol = mix(vec3(1.00, 0.58, 0.30), vec3(1.00, 0.96, 0.88),
+                      smoothstep(0.0, 0.45, sunAlt));
+    sunCol = mix(sunCol, sunCol * (0.72 + 0.46 * sig), 0.15);
     col += sunCol * exp(-sd *  9.0) * 0.30 * sunAmt;   // broad haze
     col += sunCol * exp(-sd * 42.0) * 0.55 * sunAmt;   // tight halo
     col = mix(col, vec3(1.0, 0.97, 0.90), smoothstep(0.030, 0.025, sd) * sunAmt);
@@ -343,7 +366,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
            + curtain(cuv, t, 0.42, 0.32, 0.55,
                      vec3(1.7, 3.3, 6.5), vec3(0.04, 0.025, 0.012),
                      vec3(0.11, -0.23, 0.17), 31.0, 0.9);
-  col += cur * fp.z * (1.0 - smoothstep(0.12, 0.72, dawn));
+  col += cur * fp.z * night;
 
   // meteors streak over the curtains
   col += meteors(uv, t, aspect) * starAmt;
@@ -368,8 +391,10 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   float m = smoothstep(silTop - px, silTop + px, uv.y);
   if (m > 0.0) {
     float into = clamp((uv.y - ridgeTop) / max(1.0 - ridgeTop, 0.001), 0.0, 1.0);
-    vec3 mtn = mix(vec3(11.0, 14.0, 24.0), vec3(4.0, 5.0, 9.0),
-                   clamp(into * 1.7, 0.0, 1.0)) / 255.0;
+    vec3 mtn = mix(mix(vec3(11.0, 14.0, 24.0), vec3(4.0, 5.0, 9.0),
+                       clamp(into * 1.7, 0.0, 1.0)),
+                   mix(vec3(52.0, 66.0, 50.0), vec3(24.0, 34.0, 26.0),
+                       clamp(into * 1.7, 0.0, 1.0)), day) / 255.0;
     mtn += vec3(0.030, 0.045, 0.060) * exp(-into * 50.0);
     col = mix(col, mtn, m);
   }
