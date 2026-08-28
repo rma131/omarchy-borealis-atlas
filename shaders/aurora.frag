@@ -78,6 +78,8 @@ float vnoise(vec2 p) {
 // warm palette reads as contrast against a cool sky and a cool one harmonises
 // with it. Kept a hint on purpose: this is a sunrise, not a colour swap.
 const float PALETTE_TINT = 0.30;
+// uv/s, leftward, complementing the brightest curtain's -0.030
+const float CLOUD_WIND = 0.0105;
 
 // the palette's identity with its brightness divided out, so only hue carries
 vec3 paletteSig() {
@@ -88,9 +90,17 @@ vec3 paletteSig() {
 // Wispy dawn deck. Stretched hard in x so the bands run parallel to the
 // curtains — texture rather than weather. Two octaves is plenty at this
 // opacity, and it only ever runs while dawn > 0.
+//
+// Wind. The brightest curtain drifts left at ~0.030 uv/s (its ray term is
+// sin(fx*23 + t*0.7), which travels at -rayS/rayF), so the deck goes the same
+// way at about a third of that: one weather system seen at two altitudes, the
+// far one lagging. Sampling at p.x + t*v moves content toward -x.
 float cloudField(vec2 p, float t) {
-  vec2 q = vec2(p.x * 2.6 + t * 0.010, p.y * 13.0);
-  return vnoise(q) * 0.65 + vnoise(q * 2.1 + vec2(t * 0.017, 0.0)) * 0.35;
+  // a slow swell so the deck breathes instead of sliding as a rigid sheet
+  float swell = sin(p.x * 3.0 + t * 0.05) * 0.006;
+  vec2 lo = vec2((p.x + t * CLOUD_WIND) * 2.6, (p.y + swell) * 13.0);
+  vec2 hi = vec2((p.x + t * CLOUD_WIND * 0.45) * 5.3, (p.y - swell) * 26.0 + 4.7);
+  return vnoise(lo) * 0.65 + vnoise(hi) * 0.35;
 }
 
 // ---- touch: a repulsion field ------------------------------------------
