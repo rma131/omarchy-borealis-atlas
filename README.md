@@ -111,23 +111,25 @@ As upstream — set `palette` on this plugin's entry in `~/.config/omarchy/shell
 
     { "id": "local.borealis-touch", "palette": "nord" }
 
-## Branches
+## History
 
-    git -C ~/.config/omarchy/plugins/local.borealis-touch log --oneline --all --decorate
+    git -C ~/.config/omarchy/plugins/local.borealis-touch log --oneline --decorate
 
-| Branch | What |
-|---|---|
-| `main` (tag `working-night`) | night-only: repulsion field, spring-back, palette cycle |
-| `dawn-vault` | adds the night→dawn drag (sun, setting moon, rotating stars, no aurora) |
+`main` carries everything: the night interaction and the dawn drag. The
+night-only build — repulsion field, spring-back, palette cycle, no dawn — is kept
+at the tag **`working-night`**, which is the thing to go back to if the dawn work
+ever needs undoing:
 
-Switching branches changes the shader on disk, and **Quickshell will not pick that
-up on its own** — clear its QML cache and restart the shell:
+    git switch -d working-night     # look at it
+    git switch -c night-only working-night   # or branch from it
 
-    git switch main          # or: git switch dawn-vault
+Whenever you move between these, the shader on disk changes and **Quickshell will
+not notice** — it serves its cached QML instead. Clear the cache and restart:
+
     rm -rf ~/.cache/quickshell ~/.cache/qtshadercache-*
     omarchy-restart-shell
 
-### The dawn drag (`dawn-vault` only)
+### The dawn drag
 
 A vertical drag turns the celestial vault; up goes toward dawn, down back to
 night. It is measured **relative to where the drag began**, so touching high on
