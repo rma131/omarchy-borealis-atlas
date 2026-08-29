@@ -111,6 +111,18 @@ Item {
   readonly property real driftHoursPerMinute: 1.0
   property bool drifting: false
 
+  // Bleed the smear away once the drag stops. Without this the last velocity
+  // would stick, because onTodChanged simply stops firing.
+  Timer {
+    interval: 60; repeat: true
+    running: root.opened && root.todVel > 0.015
+    onTriggered: {
+      root.todVel *= 0.72
+      if (root.todVel < 0.02) root.todVel = 0
+      if (scene) scene.ice = Qt.vector4d(scene.ice.x, scene.ice.y, root.todVel, 0)
+    }
+  }
+
   Timer {
     interval: root.driftMs
     repeat: true
@@ -240,6 +252,10 @@ Item {
   property int dataRev: 0
   onFcChanged: { _lastPush = -9999; dataRev++; pushSky(); refreshReadout() }
   onKpChanged: { _lastPush = -9999; dataRev++; pushSky() }
+  // sky angular speed, for motion blur
+  property real todVel: 0
+  property real _velTod: 0
+  property real _velMs: 0
   property real _lastPush: -9999
   // Location, in order of preference: explicit coordinates in shell.json, then
   // a place name there (geocoded once), then IP lookup. Set it per-plugin:
@@ -466,7 +482,7 @@ Item {
     var w = o.has ? o.wind : 0.0105
     if (Math.abs(w) < 0.0025) w = 0.0025
     scene.wx2 = Qt.vector4d(w, 0, o.fog, o.snowCover)
-    scene.ice = Qt.vector4d(o.frozen, o.verglas, 0, 0)
+    scene.ice = Qt.vector4d(o.frozen, o.verglas, root.todVel, 0)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -786,6 +802,16 @@ Item {
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.
       onTodChanged: {
+        // How fast the vault is turning, for the motion blur. Rises instantly
+        // on a flick and is eased back down by the timer below, so a fast scrub
+        // smears and a stop clears rather than freezing mid-trail.
+        var nowMs = Date.now()
+        var dt = (nowMs - root._velMs) / 1000.0
+        if (dt > 0.01) {
+          root.todVel = Math.max(Math.abs(scene.tod - root._velTod) / dt, root.todVel)
+          root._velTod = scene.tod
+          root._velMs = nowMs
+        }
         if (Math.abs(scene.tod - root._lastPush) > 0.0012) {
           root._lastPush = scene.tod
           root.pushSky()

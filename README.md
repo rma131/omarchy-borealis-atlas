@@ -122,6 +122,17 @@ Its *position* comes from the same phase — the moon's offset from the sun **is
 its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
 size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 
+### Motion blur
+
+Scrub fast and the stars smear along their arcs. The blur works by winding the
+vault's **rotation** back and forth across seven taps, not by sliding the sample
+point — sliding lands each tap on a different cell of the hash field, so seven
+unrelated stars pile up dimly instead of one star drawing its path. Turning the
+angle traces the same star, and the smear comes out tangential and longer further
+from the pole for free. Speed is tracked in QML, rises instantly on a flick and is
+eased back down by a timer, so a stop clears rather than freezing mid-trail. Below
+a threshold there is one tap and no cost.
+
 ### Choosing a location
 
 By default the location comes from an IP lookup, the same chain Omarchy's weather
@@ -354,6 +365,17 @@ gibbous and full all render properly, with earthshine as a ghost on the dark lim
 Its *position* comes from the same phase — the moon's offset from the sun **is**
 its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
 size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
+
+### Motion blur
+
+Scrub fast and the stars smear along their arcs. The blur works by winding the
+vault's **rotation** back and forth across seven taps, not by sliding the sample
+point — sliding lands each tap on a different cell of the hash field, so seven
+unrelated stars pile up dimly instead of one star drawing its path. Turning the
+angle traces the same star, and the smear comes out tangential and longer further
+from the pole for free. Speed is tracked in QML, rises instantly on a flick and is
+eased back down by a timer, so a stop clears rather than freezing mid-trail. Below
+a threshold there is one tap and no cost.
 
 ### Choosing a location
 

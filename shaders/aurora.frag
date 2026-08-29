@@ -42,7 +42,7 @@ layout(std140, binding = 0) uniform buf {
     vec4 astro;   // x lunar phase (0 new .5 full), y aurora probability,
                   // z inspect reveal, w special-moon emphasis
     vec4 wx2;     // x wind (uv/s, signed), y wind gust, z fog, w lying snow
-    vec4 ice;     // x frozen lake, y verglas, zw spare
+    vec4 ice;     // x frozen lake, y verglas, z sky angular speed, w spare
 };
 
 const float WATERLINE = 0.82;
@@ -272,6 +272,31 @@ vec3 meteors(vec2 uv, float t, float aspect) {
   return acc;
 }
 
+// One sample of the starfield. Pulled out of upperScene so motion blur can take
+// several of them along the direction the vault is turning; sampling the whole
+// field is more robust than stretching a single cell, which clips its own trail
+// at the cell boundary.
+vec3 starsAt(vec2 uv, float t, float thin, float angOff) {
+  float aspect = resolution.x / resolution.y;
+  vec2 piv = vec2(0.5, 1.08);
+  vec2 q = (uv - piv) * vec2(aspect, 1.0);
+  float a = -tod * 1.10 + angOff;
+  float ca = cos(a), sa = sin(a);
+  q = vec2(q.x * ca - q.y * sa, q.x * sa + q.y * ca);
+  vec2 suv = piv + vec2(q.x / aspect, q.y);
+
+  vec2 g = suv * resolution / 14.0;
+  vec2 cell = floor(g);
+  if (hash21(cell) <= 0.55) return vec3(0.0);
+  vec2 pos = vec2(hash21(cell + 7.3), hash21(cell + 3.1));
+  float d = length((fract(g) - pos) * 14.0);
+  float mag = 0.3 + 0.7 * hash21(cell + 11.7);
+  float twk = 0.55 + 0.45 * sin(t * (1.5 + 2.5 * hash21(cell + 5.2))
+                                + 6.28318 * hash21(cell + 9.4));
+  return smoothstep(1.2, 0.0, d) * mag * twk * 0.78 * vec3(0.85, 0.9, 1.0)
+         * (1.0 + thin * 1.6);
+}
+
 // Everything above the waterline; the water mirrors this whole stack.
 // fp = (duv.x, duv.y, emission gain, thinning)
 vec3 upperScene(vec2 uv, float t, vec4 fp) {
@@ -321,28 +346,25 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
 
   float starAmt = night;
 
-  // starfield (hash gather; ~14px cells, kept above 0.7 height)
+  // starfield: sampled once when still, several times along the direction of
+  // travel when the vault is turning fast enough to smear
   if (uv.y < 0.7 && starAmt > 0.0) {
-    // the vault turns through the night rather than snapping between states
-    vec2 piv = vec2(0.5, 1.08);
-    vec2 q = (uv - piv) * vec2(aspect, 1.0);
-    float a = -tod * 1.10;
-    float ca = cos(a), sa = sin(a);
-    q = vec2(q.x * ca - q.y * sa, q.x * sa + q.y * ca);
-    vec2 suv = piv + vec2(q.x / aspect, q.y);
-
-    vec2 g = suv * resolution / 14.0;
-    vec2 cell = floor(g);
-    float h = hash21(cell);
-    if (h > 0.55) {
-      vec2 pos = vec2(hash21(cell + 7.3), hash21(cell + 3.1));
-      float d = length((fract(g) - pos) * 14.0);
-      float mag = 0.3 + 0.7 * hash21(cell + 11.7);
-      float twk = 0.55 + 0.45 * sin(t * (1.5 + 2.5 * hash21(cell + 5.2))
-                                    + 6.28318 * hash21(cell + 9.4));
-      col += smoothstep(1.2, 0.0, d) * mag * twk * 0.78 * vec3(0.85, 0.9, 1.0)
-              * (1.0 + fp.w * 1.6) * starAmt;
+    // Blur by winding the vault's ROTATION back and forth, not by sliding the
+    // sample point: sliding lands each tap on a different cell, so seven
+    // unrelated stars pile up dimly instead of one star drawing its arc. Turning
+    // the angle instead traces the same star along the path it actually takes,
+    // and the direction comes out tangential for free.
+    float angSpan = min(ice.z * 1.10 / 60.0, 0.11);   // one frame of turning
+    vec3 acc = vec3(0.0);
+    if (angSpan > 0.0006) {
+      for (int i = 0; i < 7; i++)
+        acc += starsAt(uv, t, fp.w, (float(i) - 3.0) * angSpan * 0.1667);
+      // a point smeared over a path is genuinely fainter; compensate only partly
+      acc *= (1.0 / 7.0) * min(1.0 + angSpan * 20.0, 2.6);
+    } else {
+      acc = starsAt(uv, t, fp.w, 0.0);
     }
+    col += acc * starAmt;
   }
 
   // ---- aurora: drawn here, beneath the moon and the cloud, because it is
