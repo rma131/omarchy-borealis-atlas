@@ -41,6 +41,8 @@ layout(std140, binding = 0) uniform buf {
     vec4 wx;      // x cloud cover, y rain, z snow, w thunder
     vec4 astro;   // x lunar phase (0 new .5 full), y aurora probability,
                   // z inspect reveal, w special-moon emphasis
+    vec4 wx2;     // x wind (uv/s, signed), y wind gust, z fog, w lying snow
+    vec4 ice;     // x frozen lake, y verglas, zw spare
 };
 
 const float WATERLINE = 0.82;
@@ -85,7 +87,8 @@ float vnoise(vec2 p) {
 // warm palette reads as contrast against a cool sky and a cool one harmonises
 // with it. Kept a hint on purpose: this is a sunrise, not a colour swap.
 const float PALETTE_TINT = 0.30;
-// uv/s, leftward, complementing the brightest curtain's -0.030
+// Fallback drift when no wind data has arrived: the value this used to be
+// hard-coded to, chosen to complement the brightest curtain's -0.030.
 const float CLOUD_WIND = 0.0105;
 
 // the palette's identity with its brightness divided out, so only hue carries
@@ -105,8 +108,10 @@ vec3 paletteSig() {
 float cloudField(vec2 p, float t) {
   // a slow swell so the deck breathes instead of sliding as a rigid sheet
   float swell = sin(p.x * 3.0 + t * 0.05) * 0.006;
-  vec2 lo = vec2((p.x + t * CLOUD_WIND) * 2.6, (p.y + swell) * 13.0);
-  vec2 hi = vec2((p.x + t * CLOUD_WIND * 0.45) * 5.3, (p.y - swell) * 26.0 + 4.7);
+  // wx2.x is the true wind, signed, so the deck reverses when the wind does
+  float wind = wx2.x;
+  vec2 lo = vec2((p.x + t * wind) * 2.6, (p.y + swell) * 13.0);
+  vec2 hi = vec2((p.x + t * wind * 0.45) * 5.3, (p.y - swell) * 26.0 + 4.7);
   return vnoise(lo) * 0.65 + vnoise(hi) * 0.35;
 }
 
@@ -292,6 +297,11 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   vec2  moonUV    = vec2(mix(0.10, 0.90, moonDay), HORIZON - moonAlt * SUN_ARC);
 
   float day   = smoothstep(-0.04, 0.32, sunAlt);        // 1 in full daylight
+  // Snow and ice are bright under a moon, so winter is lit by whatever light is
+  // actually up. Keying it to `day` alone made winter disappear at night.
+  float moonLit = smoothstep(-0.05, 0.15, sin(((fract(td - astro.x)) - 0.25) * 2.0 * 3.14159265))
+                * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5));
+  float lit = max(day, moonLit * 0.60);
   float gold  = exp(-sunAlt * sunAlt * 26.0);           // the golden-hour band
   float night = 1.0 - smoothstep(-0.20, 0.04, sunAlt);  // 1 in full night
   vec3  sig   = paletteSig();
@@ -463,6 +473,24 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
                        clamp(into * 1.7, 0.0, 1.0)), day) / 255.0;
     mtn += vec3(0.030, 0.045, 0.060) * exp(-into * 50.0);
     mtn += auroraCol * 0.30;   // the land is bathed in it, not lit past it
+
+    // Lying snow (snow_depth), which is a different thing from snow falling:
+    // the slope goes white while the conifers stay dark, the way it looks.
+    if (wx2.w > 0.0) {
+      // `spike` is a sawtooth across the whole width, so masking by it alone
+      // striped the entire slope. The conifers only break the crest, so the
+      // dark-tree term is confined to the band just below the silhouette.
+      float treeBand = exp(-into * 30.0);
+      float tree = spike * step(0.0001, th) * treeBand;
+      float lay  = clamp(wx2.w * (1.0 - 0.65 * tree), 0.0, 1.0);
+      mtn = mix(mtn, vec3(0.86, 0.90, 0.96) * (0.16 + 0.84 * lit), lay * 0.92);
+    }
+    // Verglas: rain frozen onto the ground reads as a hard glassy sheen, not
+    // the soft scatter of snow.
+    if (ice.y > 0.0) {
+      float gl = pow(max(0.0, 1.0 - abs(uv.x - sunUV.x) * 1.9), 10.0);
+      mtn += vec3(0.55, 0.62, 0.74) * gl * ice.y * (0.18 + 0.82 * lit);
+    }
     col = mix(col, mtn, m);
   }
 
@@ -478,6 +506,20 @@ void main() {
   // displacement and the precipitation all read the same disturbance. It used
   // to be evaluated separately in both branches.
   vec3 screenFld = touchField(tp, t, aspect);
+
+  // where the light is, for the water's glitter column and the fog's colour
+  float td       = fract(tod);
+  float dayPhase = (td - 0.25) * 2.0;
+  float sunAlt   = sin(dayPhase * 3.14159265);
+  vec2  sunUV    = vec2(mix(0.10, 0.90, dayPhase), HORIZON - sunAlt * SUN_ARC);
+  float moonDay  = (fract(td - astro.x) - 0.25) * 2.0;
+  float moonAlt  = sin(moonDay * 3.14159265);
+  vec2  moonUV   = vec2(mix(0.10, 0.90, moonDay), HORIZON - moonAlt * SUN_ARC);
+  float day      = smoothstep(-0.04, 0.32, sunAlt);
+  float moonLit  = smoothstep(-0.05, 0.15, moonAlt)
+                 * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5));
+  float lit      = max(day, moonLit * 0.60);
+
   vec3 col;
 
   if (uv.y >= WATERLINE) {
@@ -486,13 +528,16 @@ void main() {
     float depth = (uv.y - WATERLINE) / (1.0 - WATERLINE);
     float K = 3.2;
     vec2 ruv = vec2(uv.x, WATERLINE - (uv.y - WATERLINE) * K);
+    // A frozen lake has no ripple, no chop, and gives nothing back to a
+    // finger pushed across it — which is most of what makes ice read as ice.
+    float liquid = 1.0 - ice.x;
     ruv.x += (0.0015 + 0.004 * depth)
              * sin(uv.y * 34.0 + t * 1.4)
-             * sin(uv.y * 11.0 - t * 0.9);
-    ruv.y += 0.004 * depth * sin(uv.x * 18.0 + uv.y * 26.0 + t * 0.8);
+             * sin(uv.y * 11.0 - t * 0.9) * liquid;
+    ruv.y += 0.004 * depth * sin(uv.x * 18.0 + uv.y * 26.0 + t * 0.8) * liquid;
     // Surface chop where the finger actually meets the water, on screen.
-    ruv.x += screenFld.x * 0.30;
-    ruv.y += screenFld.y * 0.22;
+    ruv.x += screenFld.x * 0.30 * liquid;
+    ruv.y += screenFld.y * 0.22 * liquid;
     ruv = clamp(ruv, 0.0, 1.0);
 
     // 5 taps at tight spacing (sparse wide taps ghost thin features);
@@ -517,17 +562,52 @@ void main() {
     float shimmer = 0.86 + 0.14 * sin(uv.y * 38.0 + colPhase + t * 1.8);
     shimmer *= 0.94 + 0.06 * sin(uv.y * 9.0 - t * 1.1 + colPhase * 0.7);
 
+    shimmer = mix(shimmer, 1.0, ice.x);      // ice does not shimmer
     col = refl * shimmer * (0.62 - 0.34 * depth) + vec3(0.010, 0.018, 0.038);
     col += vec3(0.05, 0.08, 0.10) * smoothstep(0.015, 0.0, uv.y - WATERLINE);
+
+    // Glitter: whichever light is actually up lays a broken column toward the
+    // viewer, widening with depth. The water's own facet noise stands in for
+    // the slope of each wavelet, so this costs one noise lookup.
+    float sA = smoothstep(-0.02, 0.12, sunAlt);
+    float mA = smoothstep(-0.02, 0.12, moonAlt) * (1.0 - day * 0.75);
+    float gAmt = max(sA, mA);
+    if (gAmt > 0.0 && ice.x < 0.999) {
+      vec2  gUV = (sA >= mA) ? sunUV : moonUV;
+      vec3  gCol = (sA >= mA) ? vec3(1.00, 0.88, 0.66) : vec3(0.82, 0.86, 0.95);
+      float w  = 0.035 + 0.34 * depth;
+      float dx = (uv.x - gUV.x) * aspect;
+      float column = exp(-dx * dx / (w * w));
+      float facet = vnoise(vec2(uv.x * 62.0 + t * 0.7, uv.y * 190.0 - t * 2.3));
+      // a low light glitters hardest; overhead it just brightens the water
+      float lowness = 1.0 - smoothstep(0.10, 0.75, max(sunAlt, moonAlt));
+      col += gCol * column * smoothstep(0.56, 0.93, facet)
+             * gAmt * (0.35 + 0.95 * lowness) * (1.0 - ice.x);
+    }
+
+    // Frozen: the mirror goes matte and pale, and the depth gradient flattens.
+    if (ice.x > 0.0) {
+      vec3 iceCol = mix(col, vec3(0.62, 0.70, 0.80) * (0.14 + 0.86 * lit), 0.78);
+      col = mix(col, iceCol, ice.x);
+    }
   } else {
     col = upperScene(uv, t, fieldParams(screenFld, aspect));
   }
 
+  // Fog sits in the air between you and the scene, so it goes on before the
+  // precipitation but after everything else, thickening toward the water.
+  if (wx2.z > 0.0) {
+    vec3 fogCol = mix(vec3(0.50, 0.53, 0.58), vec3(0.82, 0.86, 0.90), day);
+    col = mix(col, fogCol, wx2.z * smoothstep(0.26, 0.86, uv.y) * 0.88);
+  }
+
   // ---- weather, over everything, displaced by the same finger -------------
   vec2 wp = tp - screenFld.xy * 0.7;
+  // rain and snow lean with the wind rather than falling on rails
+  float lean = clamp(wx2.x * 26.0, -0.85, 0.85);
   if (wx.y > 0.0) {
-    float r = rainLayer(wp, t, 1.5, 30.0, 0.22) * 0.55
-            + rainLayer(wp, t, 2.3, 46.0, 0.28) * 0.32;
+    float r = rainLayer(wp, t, 1.5, 30.0, 0.22 + lean) * 0.55
+            + rainLayer(wp, t, 2.3, 46.0, 0.28 + lean) * 0.32;
     col += vec3(0.56, 0.66, 0.82) * r * wx.y * 0.80;
     // and it dapples the water it lands on
     if (uv.y >= WATERLINE) {
@@ -536,8 +616,10 @@ void main() {
     }
   }
   if (wx.z > 0.0) {
-    float sn = snowLayer(wp, t, 0.22, 20.0) * 0.70
-             + snowLayer(wp, t, 0.34, 31.0) * 0.45;
+    // snow is light enough that the wind carries it sideways
+    vec2 swp = vec2(wp.x + wp.y * lean * 1.6, wp.y);
+    float sn = snowLayer(swp, t, 0.22, 20.0) * 0.70
+             + snowLayer(swp, t, 0.34, 31.0) * 0.45;
     col += vec3(0.92, 0.95, 1.00) * sn * wx.z;
   }
   if (wx.w > 0.0) {

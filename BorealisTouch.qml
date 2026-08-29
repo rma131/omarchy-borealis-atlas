@@ -103,6 +103,26 @@ Item {
     scene.tod = clockFraction()
   }
 
+  // Left alone the sky drifts forward, about an hour of sky per minute of real
+  // time, so you look up and the day has moved. Touching it cancels the drift
+  // and returns to the true now: idle is ambience, touched is truth. Nothing
+  // on screen lies, because the readout is hidden while this runs.
+  readonly property int driftMs: 250
+  readonly property real driftHoursPerMinute: 1.0
+  property bool drifting: false
+
+  Timer {
+    interval: root.driftMs
+    repeat: true
+    running: root.opened && !root.scrubbing && root.inspectMode === 0
+    onTriggered: {
+      if (!scene) return
+      root.drifting = true
+      var step = (root.driftHoursPerMinute / 24.0) * (root.driftMs / 60000.0)
+      scene.tod = Math.min(root.todMax, scene.tod + step)
+    }
+  }
+
   // scrubbing / inspect state
   property real sceneH: 1080          // panel height, for readout sizing
   property bool todReturning: false
@@ -119,6 +139,39 @@ Item {
     else inspectMode = 0
     inspectReveal = inspectMode > 0 ? 1 : 0
     pushSky()
+  }
+
+  // Rebuilding a Date, formatting it and concatenating strings every frame is
+  // wasted while the readout is invisible — and the idle drift makes `tod`
+  // change every frame, so it was running constantly for nothing.
+  property string readoutLine: ""
+  function buildReadout() {
+        if (!scene) return ""
+        root.dataRev            // re-read when a fetch lands
+        var o = root.sky
+        var d = root.todToDate(scene.tod)
+        var today = new Date(); today.setHours(0, 0, 0, 0)
+        var dd = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+                             - today.getTime()) / 86400000)
+        // beyond tomorrow the date line underneath names the day already
+        var tag = dd === -1 ? "Yesterday " : dd === 1 ? "Tomorrow " : ""
+        var line = tag + Qt.formatTime(d, "HH:mm")
+        if (o.has) {
+          line += "   " + o.cond
+          if (o.temp !== null) line += "   " + Math.round(o.temp) + "\u00b0"
+        }
+        if (root.inspectMode === 1)
+          line += "   " + (o.kp !== null ? "Kp " + o.kp.toFixed(1) : "Kp \u2014")
+                + ", aurora " + root.auroraWord(o.aurora)
+        else if (root.inspectMode === 2) {
+          var m = root.moonAt(d)
+          line += "   " + m.name + (m.eventName ? "  \u00b7  " + m.eventName : "")
+                + "   " + Math.round(m.illum * 100) + "%"
+        }
+        return line
+  }
+  function refreshReadout() {
+    if (root.scrubbing || root.inspectMode > 0) root.readoutLine = buildReadout()
   }
 
   function auroraWord(p) {
@@ -162,6 +215,10 @@ Item {
   // Kp only forecasts ~3 days; past that o.kp stays null and the aurora falls
   // back to the floor rather than pretending to know.
 
+  property int dataRev: 0
+  onFcChanged: { _lastPush = -9999; dataRev++; pushSky(); refreshReadout() }
+  onKpChanged: { _lastPush = -9999; dataRev++; pushSky() }
+  property real _lastPush: -9999
   property var loc: null      // { lat, lon, name }
   property var fc: null       // { t0, code[], precip[], cloud[], temp[] }
   property var kp: null       // { t0, step, vals[] }
@@ -171,7 +228,18 @@ Item {
   readonly property real synodicDays: 29.530588853
   readonly property real anomalisticDays: 27.554549878
 
+  property var _moonCache: null
+  property real _moonAt: -9999
   function moonAt(date) {
+    // the moon does not move perceptibly inside a minute
+    var key = Math.floor(date.getTime() / 60000)
+    if (_moonAt === key && _moonCache) return _moonCache
+    var r = moonCompute(date)
+    _moonAt = key; _moonCache = r
+    return r
+  }
+
+  function moonCompute(date) {
     var ref = Date.UTC(2000, 0, 6, 18, 14)           // a known new moon
     var d = (date.getTime() - ref) / 86400000.0
     var wrap = function (v, m) { return ((v % m) + m) % m }
@@ -218,7 +286,7 @@ Item {
     if (c === 0) return { kind: "clear", label: "Clear" }
     if (c === 1 || c === 2) return { kind: "clear", label: "Partly cloudy" }
     if (c === 3) return { kind: "cloud", label: "Overcast" }
-    if (c === 45 || c === 48) return { kind: "cloud", label: "Fog" }
+    if (c === 45 || c === 48) return { kind: "fog", label: "Fog" }
     if (c >= 51 && c <= 57) return { kind: "rain", label: "Drizzle" }
     if (c === 61 || c === 63 || c === 65) return { kind: "rain", label: "Rain" }
     if (c === 66 || c === 67) return { kind: "rain", label: "Freezing rain" }
@@ -229,53 +297,134 @@ Item {
     return { kind: "cloud", label: "Cloudy" }
   }
 
+  // A code is categorical, so it cannot be averaged — but its *weights* can,
+  // which is what stops rain snapping to snow between one hour and the next.
+  function kindWeights(c) {
+    var k = classifyCode(c)
+    return { rain:  k.kind === "rain"  ? 1 : 0,
+             snow:  k.kind === "snow"  ? 1 : 0,
+             storm: k.kind === "storm" ? 1 : 0,
+             fog:   k.kind === "fog"   ? 1 : 0 }
+  }
+
+  // A lake freezes on accumulated cold, not on the temperature right now, so
+  // this reads back across the past days we already fetch.
+  function trailingMeanTemp(hr, hours) {
+    if (!fc || !fc.temp) return null
+    var e = Math.floor(hr - fc.t0), b = Math.max(0, e - hours)
+    e = Math.min(fc.temp.length - 1, e)
+    if (e < b) return null
+    var sum = 0, n = 0
+    for (var i = b; i <= e; i++) { sum += fc.temp[i]; n++ }
+    return n ? sum / n : null
+  }
+
   // ---- resolve the whole sky for one moment --------------------------------
   // todValue is hours/24 from *today's* local midnight and may run past 1, so
   // dragging into tomorrow reads tomorrow's forecast.
   function resolveSky(todValue) {
     var hr = todValue * 24.0
-    var o = { cloud: 0, rain: 0, snow: 0, storm: 0,
+    var o = { cloud: 0, rain: 0, snow: 0, storm: 0, fog: 0,
+              snowCover: 0, frozen: 0, verglas: 0, wind: 0,
               temp: null, cond: "", kp: null, aurora: auroraFloor, has: false }
 
     var x = fc ? hr - fc.t0 : -1
     if (fc && fc.code.length > 1 && x >= 0 && x <= fc.code.length - 1) {
       var i = Math.floor(x), f = x - i
       i = Math.max(0, Math.min(fc.code.length - 2, i))
-      var lp = function (a) { return a[i] + (a[i + 1] - a[i]) * f }
+      var lp = function (a) { return a ? a[i] + (a[i + 1] - a[i]) * f : 0 }
+      var mixw = function (a, b) { return a + (b - a) * f }
+
       o.cloud = Math.max(0, Math.min(1, lp(fc.cloud) / 100))
       o.temp  = lp(fc.temp)
-      // codes are categorical: take the nearer sample, never the average
-      var k = classifyCode(fc.code[f < 0.5 ? i : i + 1])
-      var inten = Math.max(0, Math.min(1, lp(fc.precip) / 2.5))
-      if (k.kind === "rain")  o.rain = Math.max(0.28, inten)
-      if (k.kind === "snow")  o.snow = Math.max(0.32, inten)
-      if (k.kind === "storm") { o.storm = Math.max(0.5, inten); o.rain = Math.max(o.rain, 0.55) }
-      o.cond = k.label
+
+      // Intensity is no longer floored, so drizzle looks like drizzle.
+      // 3 mm/h reads as heavy rain, 2 cm/h as heavy snow.
+      var wetRate  = Math.max(0, Math.min(1, lp(fc.precip) / 3.0))
+      var snowRate = Math.max(0, Math.min(1, lp(fc.snowfall) / 2.0))
+      var wA = kindWeights(fc.code[i]), wB = kindWeights(fc.code[i + 1])
+      o.rain  = mixw(wA.rain,  wB.rain)  * Math.min(1, 0.12 + wetRate)
+      o.snow  = mixw(wA.snow,  wB.snow)  * Math.min(1, 0.15 + snowRate)
+      o.storm = mixw(wA.storm, wB.storm) * Math.min(1, 0.35 + wetRate)
+      o.fog   = mixw(wA.fog,   wB.fog)
+      if (o.storm > 0) o.rain = Math.max(o.rain, o.storm * 0.8)
+
+      // snow_depth is the ground truth for "does it settle": falling snow that
+      // melts leaves this at zero, a white landscape does not. 25 cm reads full.
+      o.snowCover = Math.max(0, Math.min(1, lp(fc.depth) / 0.25))
+
+      // eastward wind component -> screen drift. Sampling p.x + t*w moves the
+      // cloud toward -x, so the sign is flipped to match the real direction.
+      var spd = lp(fc.wspd), dir = (lp(fc.wdir) || 0) * Math.PI / 180
+      var eastward = -spd * Math.sin(dir)
+      o.wind = Math.max(-0.045, Math.min(0.045, -0.0007 * eastward))
+
+      // verglas: freezing rain by code, or plain rain onto sub-zero ground
+      var code = fc.code[f < 0.5 ? i : i + 1]
+      var soil = lp(fc.soil)
+      o.verglas = (code === 56 || code === 57 || code === 66 || code === 67) ? 1.0
+                : (o.rain > 0.05 && soil < -0.5 && o.temp > -8) ? 0.7 : 0.0
+
+      var tm = trailingMeanTemp(hr, 72)
+      if (tm !== null) o.frozen = Math.max(0, Math.min(1, (-2.0 - tm) / 6.0))
+
+      o.cond = classifyCode(code).label
       o.has = true
     }
 
+    // Kp samples are evenly spaced, so index them instead of scanning 81.
     if (kp && kp.vals.length > 0) {
-      var best = 0, bd = 1e9
-      for (var j = 0; j < kp.hrs.length; j++) {
-        var dd = Math.abs(kp.hrs[j] - hr)
-        if (dd < bd) { bd = dd; best = j }
-      }
-      if (bd < 6) o.kp = kp.vals[best]      // don't claim Kp far outside the data
+      var step = kp.hrs.length > 1 ? (kp.hrs[1] - kp.hrs[0]) : 3
+      var j = Math.round((hr - kp.hrs[0]) / step)
+      if (j >= 0 && j < kp.vals.length && Math.abs(kp.hrs[j] - hr) < 6)
+        o.kp = kp.vals[j]
     }
     o.aurora = auroraProbability(o.kp)
+
     return o
   }
 
+  // Colour for one hour of the strip. Deliberately not resolveSky(): that
+  // carries a 72 h trailing mean and a Kp lookup, and calling it 36 times a
+  // frame would also evict the single-slot cache the sky itself relies on.
+  function stripColour(todValue) {
+    if (!fc || !fc.code.length) return "#00000000"
+    var x = todValue * 24.0 - fc.t0
+    if (x < -0.5 || x > fc.code.length - 0.5) return "#10ffffff"   // no data
+    var i = Math.max(0, Math.min(fc.code.length - 1, Math.round(x)))
+    var k = classifyCode(fc.code[i]).kind
+    if (k === "storm") return "#c39bf5"
+    if (k === "snow")  return "#e9f1ff"
+    if (k === "rain")  return "#6ea6dd"
+    if (k === "fog")   return "#b7bec6"
+    var cl = Math.max(0, Math.min(1, fc.cloud[i] / 100))
+    return Qt.rgba(0.29 + 0.44 * cl, 0.50 + 0.25 * cl, 0.78, 0.80 + 0.20 * cl)
+  }
+
   // ---- push the resolved sky into the two uniforms -------------------------
+  // The resolved sky, published once per push. The readout reads THIS rather
+  // than calling resolveSky itself: doing that from inside a binding made the
+  // binding read and then write the same cache, which Qt correctly reported as
+  // a binding loop and which cost more than the cache ever saved.
+  property var sky: ({ cloud: 0, rain: 0, snow: 0, storm: 0, fog: 0, snowCover: 0,
+                       frozen: 0, verglas: 0, wind: 0, temp: null, cond: "",
+                       kp: null, aurora: 0.12, has: false })
+
   function pushSky() {
     if (!scene) return
     var o = resolveSky(scene.tod)
+    root.sky = o
     var m = moonAt(todToDate(scene.tod))
     scene.wx = Qt.vector4d(o.cloud, o.rain, o.snow, o.storm)
     // apparent size swings with distance; a real event adds emphasis on top
     var emphasis = (1.0 / m.dist - 1.0) * 2.0 + m.event * 0.5
                    + (root.inspectMode === 2 ? 0.5 : 0.0)
     scene.astro = Qt.vector4d(m.phase, o.aurora, root.inspectReveal, emphasis)
+    // A dead-still sky looks broken rather than calm, so the drift has a floor.
+    var w = o.has ? o.wind : 0.0105
+    if (Math.abs(w) < 0.0025) w = 0.0025
+    scene.wx2 = Qt.vector4d(w, 0, o.fog, o.snowCover)
+    scene.ice = Qt.vector4d(o.frozen, o.verglas, 0, 0)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -305,6 +454,7 @@ Item {
       "https://api.open-meteo.com/v1/forecast"
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
       + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
+      + ",snowfall,snow_depth,soil_temperature_0cm,wind_speed_10m,wind_direction_10m"
       + "&past_days=7&forecast_days=16&timezone=auto"]   // 16 is the API max
     fcProc.running = true
   }
@@ -455,7 +605,10 @@ Item {
           var h = JSON.parse(String(text || "")).hourly
           root.fc = { t0: root.hoursFromMidnightLocal(h.time[0]),
                       code: h.weather_code, precip: h.precipitation,
-                      cloud: h.cloud_cover, temp: h.temperature_2m }
+                      cloud: h.cloud_cover, temp: h.temperature_2m,
+                      snowfall: h.snowfall, depth: h.snow_depth,
+                      soil: h.soil_temperature_0cm,
+                      wspd: h.wind_speed_10m, wdir: h.wind_direction_10m }
           root.pushSky(); root.saveCache()
         } catch (e) {}
       }
@@ -544,14 +697,25 @@ Item {
       property real tod: 0
       Behavior on tod {
         NumberAnimation {
-          duration: root.todReturning ? 1300 : 110
-          easing.type: root.todReturning ? Easing.InOutSine : Easing.OutCubic
+          duration: root.todReturning ? 1300 : (root.drifting ? root.driftMs : 110)
+          easing.type: root.todReturning ? Easing.InOutSine
+                     : root.drifting ? Easing.Linear : Easing.OutCubic
         }
       }
       // the real sky, resolved in QML (see resolveSky)
       property vector4d wx: Qt.vector4d(0, 0, 0, 0)
       property vector4d astro: Qt.vector4d(0.5, root.auroraFloor, 0, 0)
-      onTodChanged: root.pushSky()
+      property vector4d wx2: Qt.vector4d(0.0105, 0, 0, 0)   // wind, gust, fog, lying snow
+      property vector4d ice: Qt.vector4d(0, 0, 0, 0)        // frozen lake, verglas
+      // `tod` must animate every frame for the sun to move smoothly, but the
+      // weather it resolves to changes hourly, so only re-push when the sky has
+      // moved a couple of minutes. This is most of the drift's cost.
+      onTodChanged: {
+        if (Math.abs(scene.tod - root._lastPush) > 0.0012) {
+          root._lastPush = scene.tod
+          root.pushSky()
+        }
+      }
       fragmentShader: Qt.resolvedUrl("shaders/aurora.frag.qsb")
 
       // All animation gated on the overlay being open: zero work while dismissed.
@@ -597,6 +761,7 @@ Item {
         // requires a quick two-finger tap with no movement at all.
         if (touchArea.activeCount >= 1 && touchArea.gestureMoved) root.cycleInspect()
         root.todReturning = false
+        root.drifting = false
         readoutHideTimer.stop()
         touchArea.activeCount += points.length
         touchArea.gestureMaxPoints = Math.max(touchArea.gestureMaxPoints, touchArea.activeCount)
@@ -627,6 +792,7 @@ Item {
               // bare touch — a resting finger should leave the sky alone
               touchArea.gestureMoved = true
               root.scrubbing = true
+              root.refreshReadout()
             }
             // Inverted on purpose: you grab the sky and pull it, the way you
             // scroll content. Dragging left pulls later hours in from the right.
@@ -692,46 +858,26 @@ Item {
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
       anchors.bottomMargin: parent.height * 0.075
+      width: parent.width
       spacing: parent.height * 0.008
       opacity: (root.scrubbing || root.inspectMode > 0) ? 1 : 0
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
     Text {
-      anchors.horizontalCenter: parent.horizontalCenter
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
       color: "#eaf0f8"
       style: Text.Outline
       styleColor: "#66000000"
       font.pixelSize: Math.max(15, root.sceneH * 0.025)
       font.letterSpacing: 0.5
-      text: {
-        if (!scene) return ""
-        var o = root.resolveSky(scene.tod)
-        var d = root.todToDate(scene.tod)
-        var today = new Date(); today.setHours(0, 0, 0, 0)
-        var dd = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-                             - today.getTime()) / 86400000)
-        // beyond tomorrow the date line underneath names the day already
-        var tag = dd === -1 ? "Yesterday " : dd === 1 ? "Tomorrow " : ""
-        var line = tag + Qt.formatTime(d, "HH:mm")
-        if (o.has) {
-          line += "   " + o.cond
-          if (o.temp !== null) line += "   " + Math.round(o.temp) + "\u00b0"
-        }
-        if (root.inspectMode === 1)
-          line += "   " + (o.kp !== null ? "Kp " + o.kp.toFixed(1) : "Kp \u2014")
-                + ", aurora " + root.auroraWord(o.aurora)
-        else if (root.inspectMode === 2) {
-          var m = root.moonAt(d)
-          line += "   " + m.name + (m.eventName ? "  \u00b7  " + m.eventName : "")
-                + "   " + Math.round(m.illum * 100) + "%"
-        }
-        return line
-      }
+      text: root.readoutLine
     }
 
     // the day being explored, quieter than the line above it
     Text {
-      anchors.horizontalCenter: parent.horizontalCenter
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
       color: "#eaf0f8"
       opacity: 0.62
       style: Text.Outline
@@ -741,6 +887,81 @@ Item {
       text: scene ? Qt.formatDate(root.todToDate(scene.tod), "dddd d MMMM") : ""
     }
 
+    }
+
+    // A day has a shape, and scrubbing hour by hour never showed it. The strip
+    // scrolls under a fixed playhead, so the moment you are looking at is
+    // always dead centre.
+    Item {
+      id: strip
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: parent.height * 0.036
+      width: parent.width * 0.60
+      height: Math.max(5, parent.height * 0.0075)
+      opacity: (root.scrubbing || root.inspectMode > 0) ? 1 : 0
+      visible: opacity > 0.01
+      Behavior on opacity { NumberAnimation { duration: 280 } }
+
+      readonly property int span: 36                       // hours across
+      // Deliberately not bound straight to scene.tod: that re-ran all 36
+      // delegates every frame even with the strip hidden, which the idle drift
+      // then made continuous.
+      property real centre: 0
+      Connections {
+        target: scene
+        function onTodChanged() {
+          if (root.scrubbing || root.inspectMode > 0) {
+            strip.centre = scene.tod
+            root.refreshReadout()
+          }
+        }
+      }
+      onOpacityChanged: if (opacity > 0 && scene) centre = scene.tod
+      function todAt(i) { return centre + (i - span / 2 + 0.5) / 24.0 }
+
+      // a backing, so the strip reads against glittering water or bright cloud
+      Rectangle {
+        anchors.fill: parent
+        anchors.margins: -2
+        radius: height * 0.6
+        color: "#c2000000"
+      }
+
+      Row {
+        anchors.fill: parent
+        Repeater {
+          model: strip.span
+          Rectangle {
+            width: strip.width / strip.span
+            height: strip.height
+            color: root.stripColour(strip.todAt(index))
+            // a brighter edge where one day becomes the next
+            Rectangle {
+              visible: Math.floor(strip.todAt(index)) !== Math.floor(strip.todAt(index - 1))
+              width: 1; height: parent.height
+              color: "#66ffffff"
+            }
+          }
+        }
+      }
+
+      // where the real clock is, so you always know how far you have wandered
+      Rectangle {
+        width: 2; height: parent.height * 2.1
+        y: -parent.height * 0.55
+        color: "#ffd27a"
+        visible: x > -2 && x < strip.width + 2
+        x: ((root.clockFraction() - strip.centre) * 24.0 / strip.span + 0.5) * strip.width - 1
+      }
+
+      // the playhead never moves; the day slides beneath it
+      Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: 2; height: parent.height * 2.6
+        y: -parent.height * 0.8
+        color: "#ffffff"
+      }
     }
 
     Item {
