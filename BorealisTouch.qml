@@ -174,6 +174,28 @@ Item {
     if (root.scrubbing || root.inspectMode > 0) root.readoutLine = buildReadout()
   }
 
+  // One finger: two taps come home to today, three leave. A single tap does
+  // nothing on purpose — this is a screensaver you can hold a forecast in, so
+  // leaving should be deliberate. Any key still exits immediately.
+  property int tapCount: 0
+
+  function goToNow() {
+    if (!scene) return
+    root.todReturning = true
+    root.drifting = false
+    // the real present, not "this hour, still three days out" — which is what
+    // rounding to the nearest equivalent of now used to do
+    scene.tod = clockFraction()
+    root.inspectMode = 0
+    root.inspectReveal = 0
+    root.scrubbing = true
+    readoutHideTimer.restart()
+    refreshReadout()
+  }
+
+  readonly property bool awayFromNow:
+    scene ? Math.abs(scene.tod - clockFraction()) > 0.02 : false
+
   function auroraWord(p) {
     if (p >= 0.75) return "very likely"
     if (p >= 0.45) return "likely"
@@ -219,6 +241,26 @@ Item {
   onFcChanged: { _lastPush = -9999; dataRev++; pushSky(); refreshReadout() }
   onKpChanged: { _lastPush = -9999; dataRev++; pushSky() }
   property real _lastPush: -9999
+  // Location, in order of preference: explicit coordinates in shell.json, then
+  // a place name there (geocoded once), then IP lookup. Set it per-plugin:
+  //   { "id": "local.borealis-touch", "location": "Reykjavik" }
+  //   { "id": "local.borealis-touch", "latitude": 64.15, "longitude": -21.94 }
+  readonly property var configLoc: {
+    var cfg = root.shell && root.shell.shellConfig
+    var plugins = (cfg && cfg.plugins) || []
+    for (var i = 0; i < plugins.length; i++) {
+      var e = plugins[i]
+      if (!e || e.id !== "local.borealis-touch") continue
+      var la = parseFloat(e.latitude), lo = parseFloat(e.longitude)
+      if (!isNaN(la) && !isNaN(lo))
+        return { lat: la, lon: lo, name: String(e.location || "Custom") }
+      if (e.location) return { name: String(e.location) }   // geocode it
+    }
+    return null
+  }
+  // editing shell.json re-resolves immediately, which is the point of having it
+  onConfigLocChanged: { root.loc = null; refreshSky(true) }
+
   property var loc: null      // { lat, lon, name }
   property var fc: null       // { t0, code[], precip[], cloud[], temp[] }
   property var kp: null       // { t0, step, vals[] }
@@ -444,8 +486,19 @@ Item {
   function refreshSky(force) {
     if (!force && Date.now() - lastFetchMs < cacheMaxAgeMs) return
     lastFetchMs = Date.now()
-    if (loc) { fetchForecast(); fetchKp() }
-    else if (!locProc.running) locProc.running = true
+    var c = configLoc
+    if (c && c.lat !== undefined) { root.loc = c; fetchForecast(); fetchKp(); return }
+    if (c && c.name) { geocode(c.name); return }
+    if (loc) { fetchForecast(); fetchKp(); return }
+    if (!locProc.running) locProc.running = true
+  }
+
+  function geocode(place) {
+    if (geoProc.running) return
+    geoProc.command = ["curl", "-fsS", "--max-time", "8",
+      "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name="
+      + encodeURIComponent(place)]
+    geoProc.running = true
   }
 
   function fetchForecast() {
@@ -478,6 +531,12 @@ Item {
     try {
       var c = JSON.parse(String(txt || ""))
       if (!c || !c.loc) return
+      // a cache for somewhere else is not a cache for here
+      var want = root.configLoc
+      if (want && want.name && c.loc.name
+          && String(c.loc.name).toLowerCase() !== want.name.toLowerCase()) {
+        refreshSky(true); return
+      }
       loc = c.loc; fc = c.fc || null; kp = c.kp || null
       lastFetchMs = c.at || 0
       pushSky()
@@ -634,6 +693,22 @@ Item {
           root.kp = { hrs: hrs, vals: vals }
           root.pushSky(); root.saveCache()
         } catch (e) {}
+      }
+    }
+  }
+
+  // Same geocoder Omarchy's weather panel uses, so no new service is involved.
+  Process {
+    id: geoProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var r = JSON.parse(String(text || "")).results[0]
+          root.loc = { lat: r.latitude, lon: r.longitude, name: r.name }
+          root.fetchForecast(); root.fetchKp()
+        } catch (e) { /* unknown place: fall back to IP */
+          if (!locProc.running) locProc.running = true }
       }
     }
   }
@@ -822,19 +897,14 @@ Item {
         touchArea.gestureId = -1
         touchArea.gestureMaxPoints = 0
 
-        // Ease back to the real time, the short way round: tod is unbounded, so
-        // the nearest equivalent of "now" may be a whole day up or down.
-        var nowF = root.clockFraction()
-        root.todReturning = true
-        scene.tod = nowF + Math.round(scene.tod - nowF)
-        root.inspectMode = 0
-        root.inspectReveal = 0
+        // Letting go keeps the hour you landed on, so a forecast can actually
+        // be read. Double tap comes home; see goToNow().
         readoutHideTimer.restart()
 
         // one quick tap is the way out; two fingers recolours the sky; holding
         // or dragging means "I am playing" and does neither
         if (quick && fingers >= 2) root.cyclePalette()
-        else if (quick) root.dismiss()
+        else if (quick) { root.tapCount++; tapTimer.restart() }
       }
 
       onCanceled: function(points) {
@@ -845,6 +915,16 @@ Item {
           touchArea.gestureId = -1
           touchArea.gestureMaxPoints = 0
         }
+      }
+    }
+
+    Timer {
+      id: tapTimer
+      interval: 380; repeat: false
+      onTriggered: {
+        if (root.tapCount >= 3) root.dismiss()
+        else if (root.tapCount === 2) root.goToNow()
+        root.tapCount = 0
       }
     }
 
@@ -860,7 +940,10 @@ Item {
       anchors.bottomMargin: parent.height * 0.075
       width: parent.width
       spacing: parent.height * 0.008
-      opacity: (root.scrubbing || root.inspectMode > 0) ? 1 : 0
+      // Kept visible while parked away from the present, so a held forecast
+      // always says which moment you are looking at.
+      opacity: (root.scrubbing || root.inspectMode > 0) ? 1
+             : root.awayFromNow ? 0.78 : 0
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
     Text {
@@ -884,7 +967,12 @@ Item {
       styleColor: "#66000000"
       font.pixelSize: Math.max(11, root.sceneH * 0.0165)
       font.letterSpacing: 0.4
-      text: scene ? Qt.formatDate(root.todToDate(scene.tod), "dddd d MMMM") : ""
+      text: {
+        if (!scene) return ""
+        var d = Qt.formatDate(root.todToDate(scene.tod), "dddd d MMMM")
+        var where = root.loc && root.loc.name ? root.loc.name : ""
+        return where ? d + "   \u00b7   " + where : d
+      }
     }
 
     }
@@ -897,9 +985,9 @@ Item {
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
       anchors.bottomMargin: parent.height * 0.036
-      width: parent.width * 0.60
-      height: Math.max(5, parent.height * 0.0075)
-      opacity: (root.scrubbing || root.inspectMode > 0) ? 1 : 0
+      width: parent.width * 0.52
+      height: Math.max(3, parent.height * 0.0042)
+      opacity: (root.scrubbing || root.inspectMode > 0 || root.awayFromNow) ? 0.72 : 0
       visible: opacity > 0.01
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
@@ -923,9 +1011,9 @@ Item {
       // a backing, so the strip reads against glittering water or bright cloud
       Rectangle {
         anchors.fill: parent
-        anchors.margins: -2
-        radius: height * 0.6
-        color: "#c2000000"
+        anchors.margins: -1
+        radius: height
+        color: "#4d000000"
       }
 
       Row {
@@ -940,7 +1028,7 @@ Item {
             Rectangle {
               visible: Math.floor(strip.todAt(index)) !== Math.floor(strip.todAt(index - 1))
               width: 1; height: parent.height
-              color: "#66ffffff"
+              color: "#4dffffff"
             }
           }
         }
@@ -948,9 +1036,9 @@ Item {
 
       // where the real clock is, so you always know how far you have wandered
       Rectangle {
-        width: 2; height: parent.height * 2.1
-        y: -parent.height * 0.55
-        color: "#ffd27a"
+        width: 2; height: parent.height * 2.6
+        y: -parent.height * 0.8
+        color: "#e8c07a"
         visible: x > -2 && x < strip.width + 2
         x: ((root.clockFraction() - strip.centre) * 24.0 / strip.span + 0.5) * strip.width - 1
       }
@@ -958,9 +1046,10 @@ Item {
       // the playhead never moves; the day slides beneath it
       Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
-        width: 2; height: parent.height * 2.6
-        y: -parent.height * 0.8
-        color: "#ffffff"
+        width: 2; height: parent.height * 3.0
+        y: -parent.height * 1.0
+        radius: 1
+        color: "#f2ffffff"
       }
     }
 

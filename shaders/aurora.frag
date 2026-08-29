@@ -379,15 +379,24 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     vec2  q  = mp / r;
     float c  = cos(6.28318 * lunar);
     float xt = c * sqrt(max(0.0, 1.0 - q.y * q.y));
-    float lit = (lunar < 0.5) ? smoothstep(xt - 0.06, xt + 0.06, q.x)
-                              : smoothstep(-xt + 0.06, -xt - 0.06, q.x);
+    float sunlit = (lunar < 0.5) ? smoothstep(xt - 0.06, xt + 0.06, q.x)
+                                 : smoothstep(-xt + 0.06, -xt - 0.06, q.x);
     float illum = (1.0 - c) * 0.5;
     vec3 moonCol = vec3(0.95, 0.93, 0.85);
     // Earthshine is a ghost, not a grey disc: the unlit limb stays mostly
     // transparent so the sky shows through, and it only reads at all once the
     // sky is dark.
+    // The moon is tidally locked, so its markings are fixed in its own frame.
+    // Two octaves of maria plus limb darkening: enough that it reads as a lit
+    // sphere with a face rather than a white sticker, low-contrast enough that
+    // it never becomes a texture map.
+    float mar = vnoise(q * 2.3 + vec2(3.7, 1.9)) * 0.62
+              + vnoise(q * 5.7 + vec2(8.1, 4.4)) * 0.38;
+    float face = (1.0 - 0.17 * smoothstep(0.44, 0.86, mar))
+               * (1.0 - 0.28 * smoothstep(0.52, 1.03, length(q)));
+
     float ashen = 0.04 + 0.11 * night;
-    col = mix(col, moonCol, disc * moonAmt * (ashen + (1.0 - ashen) * lit));
+    col = mix(col, moonCol * face, disc * moonAmt * (ashen + (1.0 - ashen) * sunlit));
     col += moonCol * exp(-d1 * 34.0) * 0.10 * moonAmt * (0.25 + 0.75 * illum)
            * (1.0 + astro.w * 0.8);
   }

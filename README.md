@@ -117,6 +117,21 @@ Its *position* comes from the same phase — the moon's offset from the sun **is
 its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
 size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 
+### Choosing a location
+
+By default the location comes from an IP lookup, the same chain Omarchy's weather
+widget uses. To point it somewhere else — which is the easiest way to see the
+interface in another climate — add either a place name or explicit coordinates to
+this plugin's entry in `~/.config/omarchy/shell.json`:
+
+    { "id": "local.borealis-touch", "location": "Reykjavik" }
+    { "id": "local.borealis-touch", "latitude": 64.15, "longitude": -21.94 }
+
+A name is geocoded once through Open-Meteo's geocoder (again, already used by
+Omarchy). Editing the file re-resolves immediately, and a cache belonging to a
+different place is discarded rather than trusted. `auroraFloor` and `palette` live
+in the same entry.
+
 ### Time passes
 
 Left alone the sky drifts forward at about **one sky-hour per real minute**, so
@@ -161,7 +176,8 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 
 | Gesture | Result |
 |---|---|
-| Quick tap, one finger | dismiss |
+| Double tap, one finger | back to today |
+| Triple tap, one finger | leave |
 | Quick tap, two fingers (no movement) | next palette |
 | Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
 | **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
@@ -180,8 +196,13 @@ and quieter beneath.
 is about two minutes of forecast, far finer than the hourly data, while the whole
 23-day window is nine swipes wide.
 
-Releasing returns the sky to the real time, taking the short way round — `tod` is
-unbounded, so the nearest equivalent of "now" may be a whole day up or down.
+Letting go **keeps** the hour you landed on, so a forecast can actually be read.
+Double tap comes home to the real present; triple tap leaves. A single tap does
+nothing on purpose — this is a screensaver you can park a forecast in, so leaving
+should be deliberate. Any key still exits immediately.
+
+While you are parked away from now, the readout and the strip stay faintly
+visible, so a held forecast always says which moment it is showing.
 
 **Cost.** Measured back to back on AC: previous build 1048 MHz GPU avg, this one
 1093 MHz — about +4.3% for the whole feature. Precipitation composites in `main()`
@@ -324,6 +345,21 @@ Its *position* comes from the same phase — the moon's offset from the sun **is
 its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
 size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 
+### Choosing a location
+
+By default the location comes from an IP lookup, the same chain Omarchy's weather
+widget uses. To point it somewhere else — which is the easiest way to see the
+interface in another climate — add either a place name or explicit coordinates to
+this plugin's entry in `~/.config/omarchy/shell.json`:
+
+    { "id": "local.borealis-touch", "location": "Reykjavik" }
+    { "id": "local.borealis-touch", "latitude": 64.15, "longitude": -21.94 }
+
+A name is geocoded once through Open-Meteo's geocoder (again, already used by
+Omarchy). Editing the file re-resolves immediately, and a cache belonging to a
+different place is discarded rather than trusted. `auroraFloor` and `palette` live
+in the same entry.
+
 ### Time passes
 
 Left alone the sky drifts forward at about **one sky-hour per real minute**, so
@@ -368,7 +404,8 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 
 | Gesture | Result |
 |---|---|
-| Quick tap, one finger | dismiss |
+| Double tap, one finger | back to today |
+| Triple tap, one finger | leave |
 | Quick tap, two fingers (no movement) | next palette |
 | Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
 | **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
@@ -387,8 +424,13 @@ and quieter beneath.
 is about two minutes of forecast, far finer than the hourly data, while the whole
 23-day window is nine swipes wide.
 
-Releasing returns the sky to the real time, taking the short way round — `tod` is
-unbounded, so the nearest equivalent of "now" may be a whole day up or down.
+Letting go **keeps** the hour you landed on, so a forecast can actually be read.
+Double tap comes home to the real present; triple tap leaves. A single tap does
+nothing on purpose — this is a screensaver you can park a forecast in, so leaving
+should be deliberate. Any key still exits immediately.
+
+While you are parked away from now, the readout and the strip stay faintly
+visible, so a held forecast always says which moment it is showing.
 
 **Cost.** Measured back to back on AC: previous build 1048 MHz GPU avg, this one
 1093 MHz — about +4.3% for the whole feature. Precipitation composites in `main()`
