@@ -226,6 +226,32 @@ after the branch, so it costs once per pixel rather than five times through the
 water's reflection taps, and every weather block is guarded on a uniform, so clear
 weather pays almost nothing.
 
+## Considered and rejected: a real star catalogue
+
+Prototyped properly before deciding, against the HYG catalogue with real
+astronomy (sidereal time, RA/Dec to alt/az) for this location and time. It works,
+and it still is not worth adopting. Recorded so it does not get re-investigated:
+
+- **Half the sky is missing.** The scene faces south — the sun rises at the left
+  edge — so the window spans azimuth 90 to 270. Measured at Montreal on a late
+  August evening: **2118 of the 4246 stars above the horizon fall inside it, 50%**.
+  Everything northern is behind the viewer, so the Plough, Cassiopeia and Polaris
+  never appear. Those are the shapes people actually recognise.
+- **A dead band across the top.** Altitude 90 maps to y = 0.175, so the top 17% of
+  the frame is above the zenith and permanently empty.
+- **Shapes stretch.** 180 degrees of sky across the width pulls the Summer
+  Triangle into a long diagonal, with Deneb off-frame entirely.
+
+Narrowing to a 120-degree window with altitude capped at 72 fixes all three and
+looks genuinely good — the frame fills and the Milky Way's real clumping shows.
+But the sun rises at azimuth 90 and sets at 270, both **outside** that window, so
+sunrise and sunset would happen off-screen and the moon would spend much of the
+night out of frame. That is not "add real stars", it is re-aiming the camera the
+whole day cycle is built on.
+
+The hash field costs nothing, fills the frame, and never has a dead band. The
+scene is a mood piece, not a planetarium.
+
 ## Developing this plugin: clear the QML cache
 
 Quickshell caches compiled QML in `~/.cache/quickshell/qmlcache`, and it will
@@ -469,6 +495,32 @@ visible, so a held forecast always says which moment it is showing.
 after the branch, so it costs once per pixel rather than five times through the
 water's reflection taps, and every weather block is guarded on a uniform, so clear
 weather pays almost nothing.
+
+## Considered and rejected: a real star catalogue
+
+Prototyped properly before deciding, against the HYG catalogue with real
+astronomy (sidereal time, RA/Dec to alt/az) for this location and time. It works,
+and it still is not worth adopting. Recorded so it does not get re-investigated:
+
+- **Half the sky is missing.** The scene faces south — the sun rises at the left
+  edge — so the window spans azimuth 90 to 270. Measured at Montreal on a late
+  August evening: **2118 of the 4246 stars above the horizon fall inside it, 50%**.
+  Everything northern is behind the viewer, so the Plough, Cassiopeia and Polaris
+  never appear. Those are the shapes people actually recognise.
+- **A dead band across the top.** Altitude 90 maps to y = 0.175, so the top 17% of
+  the frame is above the zenith and permanently empty.
+- **Shapes stretch.** 180 degrees of sky across the width pulls the Summer
+  Triangle into a long diagonal, with Deneb off-frame entirely.
+
+Narrowing to a 120-degree window with altitude capped at 72 fixes all three and
+looks genuinely good — the frame fills and the Milky Way's real clumping shows.
+But the sun rises at azimuth 90 and sets at 270, both **outside** that window, so
+sunrise and sunset would happen off-screen and the moon would spend much of the
+night out of frame. That is not "add real stars", it is re-aiming the camera the
+whole day cycle is built on.
+
+The hash field costs nothing, fills the frame, and never has a dead band. The
+scene is a mood piece, not a planetarium.
 
 ## Developing this plugin: clear the QML cache
 
