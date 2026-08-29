@@ -386,19 +386,26 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     // Earthshine is a ghost, not a grey disc: the unlit limb stays mostly
     // transparent so the sky shows through, and it only reads at all once the
     // sky is dark.
-    // The moon is tidally locked, so its markings are fixed in its own frame.
-    // Two octaves of maria plus limb darkening: enough that it reads as a lit
-    // sphere with a face rather than a white sticker, low-contrast enough that
-    // it never becomes a texture map.
-    float mar = vnoise(q * 2.3 + vec2(3.7, 1.9)) * 0.62
-              + vnoise(q * 5.7 + vec2(8.1, 4.4)) * 0.38;
-    float face = (1.0 - 0.17 * smoothstep(0.44, 0.86, mar))
-               * (1.0 - 0.28 * smoothstep(0.52, 1.03, length(q)));
+    // Markings are fixed in the moon's own frame, since it is tidally locked.
+    // Deliberately barely there, and with no limb darkening: the disc should
+    // stay a flat clean circle with just enough unevenness to not be a plain
+    // white dot. Shading it like a sphere read as modelled, not minimal.
+    float mar = vnoise(q * 2.1 + vec2(3.7, 1.9)) * 0.62
+              + vnoise(q * 5.1 + vec2(8.1, 4.4)) * 0.38;
+    float face = 1.0 - 0.065 * smoothstep(0.46, 0.90, mar);
 
     float ashen = 0.04 + 0.11 * night;
     col = mix(col, moonCol * face, disc * moonAmt * (ashen + (1.0 - ashen) * sunlit));
-    col += moonCol * exp(-d1 * 34.0) * 0.10 * moonAmt * (0.25 + 0.75 * illum)
+    // Close aureole, tight to the disc.
+    col += moonCol * exp(-d1 * 38.0) * 0.085 * moonAmt * (0.25 + 0.75 * illum)
            * (1.0 + astro.w * 0.8);
+
+    // And the halo proper: a faint ring thrown out at roughly 22 degrees by ice
+    // crystals, which is what the disc alone was missing. Stronger through thin
+    // cloud, because that is when you actually see one.
+    float hRad = r * 3.3;
+    float halo = exp(-pow((d1 - hRad) / (r * 0.66), 2.0));
+    col += moonCol * halo * moonAmt * illum * (0.030 + 0.060 * wx.x);
   }
 
   // Cloud deck. Displaced by the touch field exactly like the curtains, so

@@ -110,6 +110,11 @@ weather is not. The curtain colour is held in a variable and fed forward, so the
 cloud deck is lit *from above* by it and the ridge is bathed in it. An overcast
 auroral night reads as glowing cloud, not a hidden aurora.
 
+**The moon.** A flat clean disc — deliberately not shaded like a sphere, which
+read as modelled rather than minimal — carrying only a whisper of maria, plus a
+soft **22-degree halo** thrown out at 3.3x its radius, stronger through thin cloud
+because that is when you actually see one.
+
 **The moon is accurate.** Phase from the synodic cycle drives a real terminator
 (`x > cos(2*pi*phase) * sqrt(1-y^2)`, mirrored when waning), so crescent, quarter,
 gibbous and full all render properly, with earthshine as a ghost on the dark limb.
@@ -337,6 +342,11 @@ Never quite zero — `auroraFloor` (default 0.12, settable per-plugin in
 weather is not. The curtain colour is held in a variable and fed forward, so the
 cloud deck is lit *from above* by it and the ridge is bathed in it. An overcast
 auroral night reads as glowing cloud, not a hidden aurora.
+
+**The moon.** A flat clean disc — deliberately not shaded like a sphere, which
+read as modelled rather than minimal — carrying only a whisper of maria, plus a
+soft **22-degree halo** thrown out at 3.3x its radius, stronger through thin cloud
+because that is when you actually see one.
 
 **The moon is accurate.** Phase from the synodic cycle drives a real terminator
 (`x > cos(2*pi*phase) * sqrt(1-y^2)`, mirrored when waning), so crescent, quarter,
