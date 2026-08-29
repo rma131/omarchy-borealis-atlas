@@ -117,6 +117,46 @@ Its *position* comes from the same phase — the moon's offset from the sun **is
 its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
 size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
 
+### Time passes
+
+Left alone the sky drifts forward at about **one sky-hour per real minute**, so
+you look up and the day has moved. Touching it cancels the drift and returns to
+the true now: idle is ambience, touched is truth — and since the readout is hidden
+while it drifts, nothing on screen ever lies.
+
+### The timeline strip
+
+While scrubbing, a strip low on screen shows the hours around you as coloured
+segments — clear, cloud, rain, snow, storm — with midnight dividers, a tick for
+the real clock, and a playhead. The strip scrolls; the playhead does not, so the
+moment you are looking at is always dead centre. It answers "when will it rain"
+at a glance, which is the one thing scrubbing alone could never do.
+
+### Winter
+
+Whether snow *settles* is a different question from whether it is falling, and
+the data answers both:
+
+| Look | Source |
+|---|---|
+| Snow in the air | `snowfall` |
+| Landscape white | **`snow_depth`** — falling snow that melts leaves this at zero |
+| Frozen lake | trailing 72 h mean of `temperature_2m`, from the past days already fetched |
+| Verglas | freezing-rain codes, or liquid precipitation onto sub-zero `soil_temperature_0cm` |
+
+A frozen lake loses its ripple, its shimmer and its mirror — and gives nothing
+back to a finger pushed across it, because ice does not ripple. Snow and ice are
+lit by whatever light is up, moon included: keying them to daylight alone made
+winter vanish at night, which is exactly backwards for a high-albedo surface.
+
+### Wind, glitter, fog
+
+Cloud drifts on the **real** wind (`wind_speed_10m` / `wind_direction_10m`),
+reversing when the wind does, and rain and snow lean with it. A low sun or moon
+lays a broken **glitter column** across the water, using the water's own facet
+noise as a slope proxy. Fog gets its own low veil rather than being more cloud.
+Precipitation intensity is no longer floored, so drizzle looks like drizzle.
+
 ### Gestures
 
 | Gesture | Result |
@@ -283,6 +323,46 @@ gibbous and full all render properly, with earthshine as a ghost on the dark lim
 Its *position* comes from the same phase — the moon's offset from the sun **is**
 its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
 size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
+
+### Time passes
+
+Left alone the sky drifts forward at about **one sky-hour per real minute**, so
+you look up and the day has moved. Touching it cancels the drift and returns to
+the true now: idle is ambience, touched is truth — and since the readout is hidden
+while it drifts, nothing on screen ever lies.
+
+### The timeline strip
+
+While scrubbing, a strip low on screen shows the hours around you as coloured
+segments — clear, cloud, rain, snow, storm — with midnight dividers, a tick for
+the real clock, and a playhead. The strip scrolls; the playhead does not, so the
+moment you are looking at is always dead centre. It answers "when will it rain"
+at a glance, which is the one thing scrubbing alone could never do.
+
+### Winter
+
+Whether snow *settles* is a different question from whether it is falling, and
+the data answers both:
+
+| Look | Source |
+|---|---|
+| Snow in the air | `snowfall` |
+| Landscape white | **`snow_depth`** — falling snow that melts leaves this at zero |
+| Frozen lake | trailing 72 h mean of `temperature_2m`, from the past days already fetched |
+| Verglas | freezing-rain codes, or liquid precipitation onto sub-zero `soil_temperature_0cm` |
+
+A frozen lake loses its ripple, its shimmer and its mirror — and gives nothing
+back to a finger pushed across it, because ice does not ripple. Snow and ice are
+lit by whatever light is up, moon included: keying them to daylight alone made
+winter vanish at night, which is exactly backwards for a high-albedo surface.
+
+### Wind, glitter, fog
+
+Cloud drifts on the **real** wind (`wind_speed_10m` / `wind_direction_10m`),
+reversing when the wind does, and rain and snow lean with it. A low sun or moon
+lays a broken **glitter column** across the water, using the water's own facet
+noise as a slope proxy. Fog gets its own low veil rather than being more cloud.
+Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 
 ### Gestures
 
