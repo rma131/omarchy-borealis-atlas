@@ -145,8 +145,32 @@ this plugin's entry in `~/.config/omarchy/shell.json`:
 
 A name is geocoded once through Open-Meteo's geocoder (again, already used by
 Omarchy). Editing the file re-resolves immediately, and a cache belonging to a
-different place is discarded rather than trusted. `auroraFloor` and `palette` live
+different place is discarded rather than trusted.
+
+With **no** location configured it follows your IP, and it re-checks on every
+summon (throttled to 90 s) rather than only once — so switching a VPN and
+reopening moves you. A jump of more than about 20 km throws away the cached
+forecast instead of showing the old city's weather under the new name. `auroraFloor` and `palette` live
 in the same entry.
+
+### The land follows the place
+
+The ground is not one painted scene. Four scalars are derived from data already
+fetched — mean temperature, rainfall, elevation and latitude — and the shader
+blends between them rather than switching between named biomes, because the world
+has no hard edges:
+
+| | drives |
+|---|---|
+| `cold` | conifers sharpen, the treeline thins, water runs to steel |
+| `arid` | ground goes to sand, trees disappear |
+| `lush` | deep saturated canopy, rounder crowns, water toward turquoise |
+| `alpine` | bare rock, and snow on the tops regardless of today's weather |
+
+Measured across real places: Dubai 35.0 °C and 0.00 mm/day gives `arid 1.00`;
+Singapore 28.0 °C and 2.82 mm/day gives `lush 1.00`; Zermatt at 1608 m gives
+`alpine 0.39`. Tree shape is a single exponent on the silhouette — high for
+conifers, low for a rounded canopy — so the whole difference costs one `pow`.
 
 ### Time passes
 
@@ -415,8 +439,32 @@ this plugin's entry in `~/.config/omarchy/shell.json`:
 
 A name is geocoded once through Open-Meteo's geocoder (again, already used by
 Omarchy). Editing the file re-resolves immediately, and a cache belonging to a
-different place is discarded rather than trusted. `auroraFloor` and `palette` live
+different place is discarded rather than trusted.
+
+With **no** location configured it follows your IP, and it re-checks on every
+summon (throttled to 90 s) rather than only once — so switching a VPN and
+reopening moves you. A jump of more than about 20 km throws away the cached
+forecast instead of showing the old city's weather under the new name. `auroraFloor` and `palette` live
 in the same entry.
+
+### The land follows the place
+
+The ground is not one painted scene. Four scalars are derived from data already
+fetched — mean temperature, rainfall, elevation and latitude — and the shader
+blends between them rather than switching between named biomes, because the world
+has no hard edges:
+
+| | drives |
+|---|---|
+| `cold` | conifers sharpen, the treeline thins, water runs to steel |
+| `arid` | ground goes to sand, trees disappear |
+| `lush` | deep saturated canopy, rounder crowns, water toward turquoise |
+| `alpine` | bare rock, and snow on the tops regardless of today's weather |
+
+Measured across real places: Dubai 35.0 °C and 0.00 mm/day gives `arid 1.00`;
+Singapore 28.0 °C and 2.82 mm/day gives `lush 1.00`; Zermatt at 1608 m gives
+`alpine 0.39`. Tree shape is a single exponent on the silhouette — high for
+conifers, low for a rounded canopy — so the whole difference costs one `pow`.
 
 ### Time passes
 
