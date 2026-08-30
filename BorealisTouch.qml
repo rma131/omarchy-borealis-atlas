@@ -278,6 +278,31 @@ Item {
   onConfigLocChanged: { root.loc = null; refreshSky(true) }
 
   property var loc: null      // { lat, lon, name }
+  property real elevation: 0
+
+  // What the land here is like, from what the forecast already tells us: how
+  // cold, how dry, how high, how lush. Four scalars the shader blends between,
+  // rather than a list of named biomes — the world does not have hard edges.
+  // A function, not a binding: as a `readonly property var` this evaluated once
+  // while fc was still null and never re-ran, so every place on earth came out
+  // with the same default terrain.
+  function computeTerrain() {
+    if (!fc || !fc.temp || !fc.temp.length) return { cold: 0.35, arid: 0.15, lush: 0.25, alpine: 0 }
+    var n = fc.temp.length, ts = 0, ps = 0
+    for (var i = 0; i < n; i++) { ts += fc.temp[i] || 0; ps += fc.precip[i] || 0 }
+    var meanT = ts / n                 // degrees C
+    var mmDay = ps / (n / 24.0)        // mm per day
+    var absLat = loc ? Math.abs(loc.lat) : 45
+
+    var cl = function (v) { return Math.max(0, Math.min(1, v)) }
+    var cold   = cl((8.0 - meanT) / 22.0)
+    var arid   = cl(1.0 - mmDay / 2.2)
+    var alpine = cl((root.elevation - 900) / 1800)
+    var lush   = cl((meanT - 13.0) / 12.0) * (1.0 - arid) * (1.0 - alpine)
+    // very high latitude thins the treeline regardless of the local average
+    cold = Math.max(cold, cl((absLat - 58.0) / 12.0) * 0.85)
+    return { cold: cold, arid: arid, lush: lush, alpine: alpine }
+  }
   property var fc: null       // { t0, code[], precip[], cloud[], temp[] }
   property var kp: null       // { t0, step, vals[] }
   property real lastFetchMs: 0
@@ -483,6 +508,8 @@ Item {
     if (Math.abs(w) < 0.0025) w = 0.0025
     scene.wx2 = Qt.vector4d(w, 0, o.fog, o.snowCover)
     scene.ice = Qt.vector4d(o.frozen, o.verglas, root.todVel, 0)
+    var tr = root.computeTerrain()
+    scene.land = Qt.vector4d(tr.cold, tr.arid, tr.lush, tr.alpine)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -505,7 +532,18 @@ Item {
     var c = configLoc
     if (c && c.lat !== undefined) { root.loc = c; fetchForecast(); fetchKp(); return }
     if (c && c.name) { geocode(c.name); return }
-    if (loc) { fetchForecast(); fetchKp(); return }
+    // No shortcut on an existing loc: the IP can move (a VPN, or actually
+    // travelling), so an unconfigured location is re-detected every refresh.
+    checkLocation(true)
+  }
+
+  property real lastLocMs: 0
+  // Throttled so summoning repeatedly does not hammer the lookup, but quick
+  // enough that flipping a VPN and reopening shows the new place.
+  function checkLocation(force) {
+    if (configLoc) return
+    if (!force && Date.now() - lastLocMs < 90000) return
+    lastLocMs = Date.now()
     if (!locProc.running) locProc.running = true
   }
 
@@ -633,6 +671,7 @@ Item {
   }
 
   function open(payloadJson) {
+    root.checkLocation(false)
     root.syncTimeOfDay()
     root.opened = true
     root.clearSlots()
@@ -662,9 +701,17 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
+          // An IP lookup started before shell.json was read can land after it;
+          // without this it would quietly overwrite an explicit location.
+          if (root.configLoc) return
           var a = JSON.parse(String(text || "")).nearest_area[0]
-          root.loc = { lat: parseFloat(a.latitude), lon: parseFloat(a.longitude),
-                       name: (a.areaName && a.areaName[0] && a.areaName[0].value) || "" }
+          var nl = { lat: parseFloat(a.latitude), lon: parseFloat(a.longitude),
+                     name: (a.areaName && a.areaName[0] && a.areaName[0].value) || "" }
+          // a fifth of a degree is roughly 20 km: far enough to be somewhere else
+          var moved = !root.loc || Math.abs(nl.lat - root.loc.lat) > 0.2
+                                || Math.abs(nl.lon - root.loc.lon) > 0.2
+          root.loc = nl
+          if (moved) { root.fc = null; root.kp = null; root._lastPush = -9999 }
           root.fetchForecast(); root.fetchKp()
         } catch (e) { /* offline: the scene simply stays as it is */ }
       }
@@ -677,7 +724,9 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var h = JSON.parse(String(text || "")).hourly
+          var j = JSON.parse(String(text || ""))
+          var h = j.hourly
+          root.elevation = parseFloat(j.elevation) || 0
           root.fc = { t0: root.hoursFromMidnightLocal(h.time[0]),
                       code: h.weather_code, precip: h.precipitation,
                       cloud: h.cloud_cover, temp: h.temperature_2m,
@@ -798,6 +847,7 @@ Item {
       property vector4d astro: Qt.vector4d(0.5, root.auroraFloor, 0, 0)
       property vector4d wx2: Qt.vector4d(0.0105, 0, 0, 0)   // wind, gust, fog, lying snow
       property vector4d ice: Qt.vector4d(0, 0, 0, 0)        // frozen lake, verglas
+      property vector4d land: Qt.vector4d(0.35, 0.15, 0.25, 0)  // cold, arid, lush, alpine
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.

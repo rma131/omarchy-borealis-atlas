@@ -43,6 +43,9 @@ layout(std140, binding = 0) uniform buf {
                   // z inspect reveal, w special-moon emphasis
     vec4 wx2;     // x wind (uv/s, signed), y wind gust, z fog, w lying snow
     vec4 ice;     // x frozen lake, y verglas, z sky angular speed, w spare
+    // What the land here is like. Blended, not switched: the world has no hard
+    // edges between a forest and a desert.
+    vec4 land;    // x cold, y arid, z lush, w alpine
 };
 
 const float WATERLINE = 0.82;
@@ -497,20 +500,41 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   float tw = 170.0;
   float cell = floor(fx * tw);
   float hcell = hash21(vec2(cell, 3.7));
-  float th = (hcell < 0.12) ? 0.0 : 0.005 + 0.011 * hcell;
-  float spike = 1.0 - abs(fract(fx * tw) * 2.0 - 1.0);
+  // Dry ground, bare rock and hard cold all thin the treeline out.
+  float bare = clamp(0.12 + 0.80 * max(land.y, land.w) + 0.40 * land.x, 0.0, 0.97);
+  float grow = (1.0 - land.y) * (1.0 - 0.85 * land.w) * (0.45 + 0.75 * land.z);
+  float th = (hcell < bare) ? 0.0 : (0.004 + 0.012 * hcell) * clamp(grow, 0.15, 1.4);
+  // Conifers come to a point where it is cold or high; broadleaf and palm
+  // canopies are rounder, so the exponent carries the whole difference.
+  float shp = mix(0.55, 2.3, clamp(land.x + land.w * 0.7, 0.0, 1.0));
+  float spike = pow(max(1.0 - abs(fract(fx * tw) * 2.0 - 1.0), 0.0), shp);
   float silTop = ridgeTop - th * spike;
 
   float px = 1.5 / resolution.y;
   float m = smoothstep(silTop - px, silTop + px, uv.y);
   if (m > 0.0) {
     float into = clamp((uv.y - ridgeTop) / max(1.0 - ridgeTop, 0.001), 0.0, 1.0);
-    vec3 mtn = mix(mix(vec3(11.0, 14.0, 24.0), vec3(4.0, 5.0, 9.0),
-                       clamp(into * 1.7, 0.0, 1.0)),
-                   mix(vec3(52.0, 66.0, 50.0), vec3(24.0, 34.0, 26.0),
-                       clamp(into * 1.7, 0.0, 1.0)), day) / 255.0;
+    // Daylight ground, blended from what the climate implies rather than
+    // chosen from a list: boreal green by default, sand as it dries, deep green
+    // as it gets lush, bare rock as it rises.
+    float dep = clamp(into * 1.7, 0.0, 1.0);
+    vec3 gNear = mix(vec3(52.0, 66.0, 50.0), vec3(150.0, 124.0, 86.0), land.y);
+    vec3 gFar  = mix(vec3(24.0, 34.0, 26.0), vec3( 98.0,  80.0, 56.0), land.y);
+    gNear = mix(gNear, vec3(38.0, 80.0, 42.0), land.z);
+    gFar  = mix(gFar,  vec3(16.0, 42.0, 24.0), land.z);
+    gNear = mix(gNear, vec3(98.0, 100.0, 106.0), land.w);
+    gFar  = mix(gFar,  vec3(54.0,  57.0,  64.0), land.w);
+    // night keeps its blue, warmed a little over dry ground
+    vec3 nNear = mix(vec3(11.0, 14.0, 24.0), vec3(22.0, 18.0, 20.0), land.y * 0.7);
+    vec3 nFar  = mix(vec3( 4.0,  5.0,  9.0), vec3(10.0,  8.0,  8.0), land.y * 0.7);
+    vec3 mtn = mix(mix(nNear, nFar, dep), mix(gNear, gFar, dep), day) / 255.0;
     mtn += vec3(0.030, 0.045, 0.060) * exp(-into * 50.0);
     mtn += auroraCol * 0.30;   // the land is bathed in it, not lit past it
+
+    // Height keeps its own snow, quite apart from today's weather.
+    float capAmt = clamp((land.w - 0.22) * 1.7, 0.0, 1.0) * exp(-into * 3.2);
+    if (capAmt > 0.0)
+      mtn = mix(mtn, vec3(0.88, 0.91, 0.96) * (0.16 + 0.84 * lit), capAmt * 0.88);
 
     // Lying snow (snow_depth), which is a different thing from snow falling:
     // the slope goes white while the conifers stay dark, the way it looks.
@@ -599,6 +623,10 @@ void main() {
     float colPhase = 3.5 * mix(hash21(vec2(ci, 0.0)), hash21(vec2(ci + 1.0, 0.0)), cf);
     float shimmer = 0.86 + 0.14 * sin(uv.y * 38.0 + colPhase + t * 1.8);
     shimmer *= 0.94 + 0.06 * sin(uv.y * 9.0 - t * 1.1 + colPhase * 0.7);
+
+    // Warm shallow water runs turquoise, cold water runs to steel.
+    col *= mix(vec3(1.0), vec3(0.70, 1.08, 1.10), land.z * 0.85);
+    col *= mix(vec3(1.0), vec3(0.88, 0.95, 1.08), land.x * 0.6);
 
     shimmer = mix(shimmer, 1.0, ice.x);      // ice does not shimmer
     col = refl * shimmer * (0.62 - 0.34 * depth) + vec3(0.010, 0.018, 0.038);
