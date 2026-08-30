@@ -538,13 +538,18 @@ Item {
   }
 
   property real lastLocMs: 0
+  property real locStartedMs: 0
   // Throttled so summoning repeatedly does not hammer the lookup, but quick
   // enough that flipping a VPN and reopening shows the new place.
   function checkLocation(force) {
     if (configLoc) return
-    if (!force && Date.now() - lastLocMs < 90000) return
+    // A lookup already in flight is left alone, but only for as long as curl's
+    // own timeout: a wedged one must not disable detection for the session.
+    if (locProc.running && Date.now() - locStartedMs < 20000) return
+    if (!force && Date.now() - lastLocMs < 8000) return
     lastLocMs = Date.now()
-    if (!locProc.running) locProc.running = true
+    locStartedMs = Date.now()
+    locProc.running = true
   }
 
   function geocode(place) {
@@ -594,6 +599,8 @@ Item {
       loc = c.loc; fc = c.fc || null; kp = c.kp || null
       lastFetchMs = c.at || 0
       pushSky()
+      // the cache says where you were, not where you are
+      checkLocation(true)
       if (Date.now() - lastFetchMs >= cacheMaxAgeMs) refreshSky(true)
     } catch (e) { /* a corrupt cache is simply no cache */ }
   }
@@ -671,7 +678,7 @@ Item {
   }
 
   function open(payloadJson) {
-    root.checkLocation(false)
+    root.checkLocation(true)
     root.syncTimeOfDay()
     root.opened = true
     root.clearSlots()
