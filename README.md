@@ -147,9 +147,10 @@ A name is geocoded once through Open-Meteo's geocoder (again, already used by
 Omarchy). Editing the file re-resolves immediately, and a cache belonging to a
 different place is discarded rather than trusted.
 
-With **no** location configured it follows your IP, and it re-checks on every
-summon (throttled to 90 s) rather than only once — so switching a VPN and
-reopening moves you. A jump of more than about 20 km throws away the cached
+With **no** location configured it follows your IP, and **every summon forces a
+fresh lookup** — change a VPN, reopen, and you are somewhere else. The cached
+location is treated as where you *were*, never as the answer, so it is always
+re-verified on load. A jump of more than about 20 km throws away the cached
 forecast instead of showing the old city's weather under the new name. `auroraFloor` and `palette` live
 in the same entry.
 
@@ -441,9 +442,10 @@ A name is geocoded once through Open-Meteo's geocoder (again, already used by
 Omarchy). Editing the file re-resolves immediately, and a cache belonging to a
 different place is discarded rather than trusted.
 
-With **no** location configured it follows your IP, and it re-checks on every
-summon (throttled to 90 s) rather than only once — so switching a VPN and
-reopening moves you. A jump of more than about 20 km throws away the cached
+With **no** location configured it follows your IP, and **every summon forces a
+fresh lookup** — change a VPN, reopen, and you are somewhere else. The cached
+location is treated as where you *were*, never as the answer, so it is always
+re-verified on load. A jump of more than about 20 km throws away the cached
 forecast instead of showing the old city's weather under the new name. `auroraFloor` and `palette` live
 in the same entry.
 
