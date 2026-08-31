@@ -92,6 +92,12 @@ Item {
   readonly property real todGain: 2.5
 
   // the clock is the default: whatever time it actually is when you summon it
+
+
+
+
+
+
   function clockFraction() {
     var n = new Date()
     return (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds()) / 86400.0
@@ -252,6 +258,8 @@ Item {
   property int dataRev: 0
   onFcChanged: { _lastPush = -9999; dataRev++; pushSky(); refreshReadout() }
   onKpChanged: { _lastPush = -9999; dataRev++; pushSky() }
+  onRingChanged: { _lastPush = -9999; pushSky() }
+  onClimateChanged: { _lastPush = -9999; pushSky() }
   // sky angular speed, for motion blur
   property real todVel: 0
   property real _velTod: 0
@@ -275,10 +283,19 @@ Item {
     return null
   }
   // editing shell.json re-resolves immediately, which is the point of having it
-  onConfigLocChanged: { root.loc = null; refreshSky(true) }
+  // The ring and the climate belong to the old place, not the new one. Leaving
+  // them behind showed Phoenix with Montreal's aridity for as long as the
+  // archive took to answer — and wrote that pairing into the cache.
+  onConfigLocChanged: {
+    root.loc = null; root.ring = null; root.climate = null
+    root.fc = null; root.kp = null
+    refreshSky(true)
+  }
 
-  property var loc: null      // { lat, lon, name }
+  property var loc: null      // { lat, lon, name, country }
   property real elevation: 0
+  property var ring: null     // { spread (m across ~100 km), sea (0..1) }
+  property var climate: null  // { ai } — a year of P / PET
 
   // What the land here is like, from what the forecast already tells us: how
   // cold, how dry, how high, how lush. Four scalars the shader blends between,
@@ -287,7 +304,10 @@ Item {
   // while fc was still null and never re-ran, so every place on earth came out
   // with the same default terrain.
   function computeTerrain() {
-    if (!fc || !fc.temp || !fc.temp.length) return { cold: 0.35, arid: 0.15, lush: 0.25, alpine: 0 }
+    if (!fc || !fc.temp || !fc.temp.length)
+      return { cold: 0.35, arid: 0.15, lush: 0.25, alpine: 0,
+               relief: ring ? Math.max(0, Math.min(1, (ring.spread - 30.0) / 1200.0)) : 0.5,
+               water: 1.0 }
     var n = fc.temp.length, ts = 0, ps = 0
     for (var i = 0; i < n; i++) { ts += fc.temp[i] || 0; ps += fc.precip[i] || 0 }
     var meanT = ts / n                 // degrees C
@@ -296,12 +316,36 @@ Item {
 
     var cl = function (v) { return Math.max(0, Math.min(1, v)) }
     var cold   = cl((8.0 - meanT) / 22.0)
-    var arid   = cl(1.0 - mmDay / 2.2)
+    // UNEP puts arid below 0.20 and humid above 0.65; this spans that range.
+    // The three-week fallback is only what shows before the archive lands.
+    var arid   = climate ? cl((0.55 - climate.ai) / 0.50)
+                         : cl(1.0 - mmDay / 2.2)
     var alpine = cl((root.elevation - 900) / 1800)
-    var lush   = cl((meanT - 13.0) / 12.0) * (1.0 - arid) * (1.0 - alpine)
+    // Vegetation follows water, not warmth: Phoenix is hotter than Montreal and
+    // far greener by this measure until the aridity index gets a say. Without
+    // it, a desert came out lush 0.45 and the ground was drawn forest green.
+    var wet    = climate ? cl((climate.ai - 0.55) / 0.55) : (1.0 - arid)
+    var lush   = cl((meanT - 13.0) / 12.0) * wet * (1.0 - alpine)
     // very high latitude thins the treeline regardless of the local average
     cold = Math.max(cold, cl((absLat - 58.0) / 12.0) * 0.85)
-    return { cold: cold, arid: arid, lush: lush, alpine: alpine }
+
+    // How high the skyline stands, measured rather than assumed: the spread of
+    // elevation across the ring. Montreal comes out near flat at 63 m, Phoenix
+    // ringed by real mountains at 414, Zermatt off the top at 2345.
+    // 0.5 is the default because it reproduces exactly the amplitude the ridge
+    // had before this was measured, so a failed lookup changes nothing.
+    var relief = ring ? cl((ring.spread - 30.0) / 1200.0) : 0.5
+
+    // Sea shows up in the ring as points at zero. Lakes and rivers do not —
+    // they sit above sea level — so standing water inland is inferred from the
+    // climate instead: a place has to be genuinely humid to keep any. Phoenix
+    // is semi-arid and gets none; Dubai is drier still but sits on the Gulf,
+    // and the ring finds it.
+    var inland = climate ? cl((climate.ai - 0.40) / 0.35) : 1.0
+    var water = ring ? cl(Math.max(ring.sea * 1.6, inland)) : inland
+
+    return { cold: cold, arid: arid, lush: lush, alpine: alpine,
+             relief: relief, water: water }
   }
   property var fc: null       // { t0, code[], precip[], cloud[], temp[] }
   property var kp: null       // { t0, step, vals[] }
@@ -409,7 +453,16 @@ Item {
     var hr = todValue * 24.0
     var o = { cloud: 0, rain: 0, snow: 0, storm: 0, fog: 0,
               snowCover: 0, frozen: 0, verglas: 0, wind: 0,
+              rise: 0.25, set: 0.75,
               temp: null, cond: "", kp: null, aurora: auroraFloor, has: false }
+
+    // The hourly samples start at midnight of the first day, so the day index
+    // is just the hour offset over 24 — the same axis, coarser.
+    if (fc && fc.rise && fc.rise.length) {
+      var di = Math.floor((hr - fc.t0) / 24.0)
+      di = Math.max(0, Math.min(fc.rise.length - 1, di))
+      o.rise = fc.rise[di]; o.set = fc.set[di]
+    }
 
     var x = fc ? hr - fc.t0 : -1
     if (fc && fc.code.length > 1 && x >= 0 && x <= fc.code.length - 1) {
@@ -510,6 +563,7 @@ Item {
     scene.ice = Qt.vector4d(o.frozen, o.verglas, root.todVel, 0)
     var tr = root.computeTerrain()
     scene.land = Qt.vector4d(tr.cold, tr.arid, tr.lush, tr.alpine)
+    scene.geo = Qt.vector4d(tr.relief, tr.water, o.rise, o.set)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -518,6 +572,34 @@ Item {
                       parseInt(t[0], 10), parseInt(t[1] || "0", 10), 0)
     var mid = new Date(); mid.setHours(0, 0, 0, 0)
     return (dt.getTime() - mid.getTime()) / 3600000.0
+  }
+
+  // "2026-08-30T05:59" -> 0.2493, a fraction of the local day. The forecast is
+  // fetched with timezone=auto, so these are already local wall-clock times and
+  // land on the same axis `tod` runs along.
+  function dayFractionOf(iso) {
+    var t = String(iso).split("T")[1]
+    if (!t) return -1
+    var q = t.split(":")
+    return (parseInt(q[0], 10) + parseInt(q[1] || "0", 10) / 60.0) / 24.0
+  }
+
+  // Inside the polar circles the sun does not cross the horizon at all and the
+  // API returns null; daylight_duration is what says which kind of nothing it
+  // is. A near-full or near-empty day is as close as the sine model can get,
+  // and reads correctly as a sun that grazes the horizon or never clears it.
+  function parseDaylight(dy) {
+    var rise = [], set = []
+    var n = (dy && dy.time) ? dy.time.length : 0
+    for (var k = 0; k < n; k++) {
+      var r = dy.sunrise ? dy.sunrise[k] : null
+      var t = dy.sunset  ? dy.sunset[k]  : null
+      var dur = dy.daylight_duration ? dy.daylight_duration[k] : null
+      if (r && t) { rise.push(dayFractionOf(r)); set.push(dayFractionOf(t)) }
+      else if (dur !== null && dur > 43200) { rise.push(0.02); set.push(0.98) }
+      else { rise.push(0.48); set.push(0.52) }
+    }
+    return { rise: rise, set: set }
   }
 
   function hoursFromMidnightUtc(iso) {        // NOAA time_tag, UTC, no suffix
@@ -530,7 +612,9 @@ Item {
     if (!force && Date.now() - lastFetchMs < cacheMaxAgeMs) return
     lastFetchMs = Date.now()
     var c = configLoc
-    if (c && c.lat !== undefined) { root.loc = c; fetchForecast(); fetchKp(); return }
+    if (c && c.lat !== undefined) {
+      root.loc = c; fetchForecast(); fetchKp(); fetchElevation(); fetchClimate(); return
+    }
     if (c && c.name) { geocode(c.name); return }
     // No shortcut on an existing loc: the IP can move (a VPN, or actually
     // travelling), so an unconfigured location is re-detected every refresh.
@@ -567,8 +651,58 @@ Item {
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
       + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
       + ",snowfall,snow_depth,soil_temperature_0cm,wind_speed_10m,wind_direction_10m"
+      + "&daily=sunrise,sunset,daylight_duration"
       + "&past_days=7&forecast_days=16&timezone=auto"]   // 16 is the API max
     fcProc.running = true
+  }
+
+  // Aridity is a property of the climate, not of the next three weeks. Asking
+  // the forecast window put Phoenix at 2.66 mm/day — a monsoon burst — and grew
+  // it a lush lakeside. A year of the reanalysis archive gives the real answer,
+  // and the model's habit of over-raining on deserts cancels out because what
+  // is measured is the ratio of rain to how fast the sun takes it back:
+  // P / PET, the UN's aridity index. Sahara 0.01, Dubai 0.18, Phoenix 0.26,
+  // Zermatt 0.89, Montreal 1.20 — which is exactly the right order.
+  function fetchClimate() {
+    if (!loc || climProc.running) return
+    // the archive runs a few days behind live, so end a week back
+    var end = new Date(Date.now() - 7 * 86400000)
+    var start = new Date(end.getTime() - 365 * 86400000)
+    var iso = function (d) {
+      var m = d.getMonth() + 1, dd = d.getDate()
+      return d.getFullYear() + "-" + (m < 10 ? "0" : "") + m
+                             + "-" + (dd < 10 ? "0" : "") + dd
+    }
+    climProc.command = ["curl", "-fsS", "--max-time", "12",
+      "https://archive-api.open-meteo.com/v1/archive?latitude=" + loc.lat
+      + "&longitude=" + loc.lon
+      + "&start_date=" + iso(start) + "&end_date=" + iso(end)
+      + "&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=auto"]
+    climProc.running = true
+  }
+
+  // How rugged the country is, and whether there is sea in it — from one call.
+  // Nine points, a centre and a ring at roughly 50 km, which describes the
+  // skyline you would see rather than the ground under your feet.
+  function fetchElevation() {
+    if (!loc || elevProc.running) return
+    var dLat = 0.45
+    // a degree of longitude shrinks toward the poles; keep the ring circular
+    var dLon = 0.45 / Math.max(0.20, Math.cos(loc.lat * Math.PI / 180))
+    var oct = [[0, 0], [1, 0], [0.71, 0.71], [0, 1], [-0.71, 0.71],
+               [-1, 0], [-0.71, -0.71], [0, -1], [0.71, -0.71]]
+    var la = [], lo = []
+    for (var i = 0; i < oct.length; i++) {
+      var y = Math.max(-89.5, Math.min(89.5, loc.lat + oct[i][0] * dLat))
+      var x = loc.lon + oct[i][1] * dLon
+      while (x > 180) x -= 360
+      while (x < -180) x += 360
+      la.push(y.toFixed(4)); lo.push(x.toFixed(4))
+    }
+    elevProc.command = ["curl", "-fsS", "--max-time", "8",
+      "https://api.open-meteo.com/v1/elevation?latitude=" + la.join(",")
+      + "&longitude=" + lo.join(",")]
+    elevProc.running = true
   }
 
   function fetchKp() {
@@ -578,7 +712,8 @@ Item {
 
   function saveCache() {
     if (!loc) return
-    var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp }
+    var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
+                    ring: ring, elevation: elevation, climate: climate }
     // base64 through argv: no quoting or escaping can go wrong
     cacheWriteProc.command = ["sh", "-c",
       "mkdir -p \"$(dirname \"$1\")\"; printf %s \"$2\" | base64 -d > \"$1\"",
@@ -597,8 +732,12 @@ Item {
         refreshSky(true); return
       }
       loc = c.loc; fc = c.fc || null; kp = c.kp || null
+      ring = c.ring || null; elevation = c.elevation || 0
+      climate = c.climate || null
       lastFetchMs = c.at || 0
       pushSky()
+      if (!ring) fetchElevation()
+      if (!climate) fetchClimate()
       // the cache says where you were, not where you are
       checkLocation(true)
       if (Date.now() - lastFetchMs >= cacheMaxAgeMs) refreshSky(true)
@@ -713,13 +852,17 @@ Item {
           if (root.configLoc) return
           var a = JSON.parse(String(text || "")).nearest_area[0]
           var nl = { lat: parseFloat(a.latitude), lon: parseFloat(a.longitude),
-                     name: (a.areaName && a.areaName[0] && a.areaName[0].value) || "" }
+                     name: (a.areaName && a.areaName[0] && a.areaName[0].value) || "",
+                     country: (a.country && a.country[0] && a.country[0].value) || "" }
           // a fifth of a degree is roughly 20 km: far enough to be somewhere else
           var moved = !root.loc || Math.abs(nl.lat - root.loc.lat) > 0.2
                                 || Math.abs(nl.lon - root.loc.lon) > 0.2
           root.loc = nl
-          if (moved) { root.fc = null; root.kp = null; root._lastPush = -9999 }
+          if (moved) { root.fc = null; root.kp = null; root.ring = null
+                       root.climate = null; root._lastPush = -9999 }
           root.fetchForecast(); root.fetchKp()
+          if (moved || !root.ring) root.fetchElevation()
+          if (moved || !root.climate) root.fetchClimate()
         } catch (e) { /* offline: the scene simply stays as it is */ }
       }
     }
@@ -734,12 +877,14 @@ Item {
           var j = JSON.parse(String(text || ""))
           var h = j.hourly
           root.elevation = parseFloat(j.elevation) || 0
+          var sr = root.parseDaylight(j.daily)
           root.fc = { t0: root.hoursFromMidnightLocal(h.time[0]),
                       code: h.weather_code, precip: h.precipitation,
                       cloud: h.cloud_cover, temp: h.temperature_2m,
                       snowfall: h.snowfall, depth: h.snow_depth,
                       soil: h.soil_temperature_0cm,
-                      wspd: h.wind_speed_10m, wdir: h.wind_direction_10m }
+                      wspd: h.wind_speed_10m, wdir: h.wind_direction_10m,
+                      rise: sr.rise, set: sr.set }
           root.pushSky(); root.saveCache()
         } catch (e) {}
       }
@@ -769,6 +914,50 @@ Item {
     }
   }
 
+  Process {
+    id: climProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var d = JSON.parse(String(text || "")).daily
+          var ps = 0, es = 0
+          for (var i = 0; i < d.time.length; i++) {
+            ps += d.precipitation_sum[i] || 0
+            es += d.et0_fao_evapotranspiration[i] || 0
+          }
+          if (es <= 0) return
+          root.climate = { ai: ps / es }
+          root.pushSky(); root.saveCache()
+        } catch (e) { /* no archive: the window heuristic stands in */ }
+      }
+    }
+  }
+
+  Process {
+    id: elevProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var e = JSON.parse(String(text || "")).elevation
+          if (!e || !e.length) return
+          var lo = e[0], hi = e[0], sea = 0
+          for (var i = 0; i < e.length; i++) {
+            var v = e[i] || 0
+            if (v < lo) lo = v
+            if (v > hi) hi = v
+            // the dataset returns 0 over open water; land at exactly sea level
+            // is rare enough, and wet enough, that the confusion is harmless
+            if (v <= 0.5) sea++
+          }
+          root.ring = { spread: hi - lo, sea: sea / e.length }
+          root.pushSky(); root.saveCache()
+        } catch (err) { /* no ring: the scene keeps its default landscape */ }
+      }
+    }
+  }
+
   // Same geocoder Omarchy's weather panel uses, so no new service is involved.
   Process {
     id: geoProc
@@ -777,8 +966,9 @@ Item {
       onStreamFinished: {
         try {
           var r = JSON.parse(String(text || "")).results[0]
-          root.loc = { lat: r.latitude, lon: r.longitude, name: r.name }
-          root.fetchForecast(); root.fetchKp()
+          root.loc = { lat: r.latitude, lon: r.longitude, name: r.name,
+                       country: r.country || "" }
+          root.fetchForecast(); root.fetchKp(); root.fetchElevation(); root.fetchClimate()
         } catch (e) { /* unknown place: fall back to IP */
           if (!locProc.running) locProc.running = true }
       }
@@ -855,6 +1045,10 @@ Item {
       property vector4d wx2: Qt.vector4d(0.0105, 0, 0, 0)   // wind, gust, fog, lying snow
       property vector4d ice: Qt.vector4d(0, 0, 0, 0)        // frozen lake, verglas
       property vector4d land: Qt.vector4d(0.35, 0.15, 0.25, 0)  // cold, arid, lush, alpine
+      // relief, water, sunrise, sunset. The defaults are the constants this
+      // replaced: 0.5 relief is the old fixed ridge amplitude, 1.0 water the
+      // lake that used to be unconditional, 0.25/0.75 the old six-to-six day.
+      property vector4d geo: Qt.vector4d(0.5, 1.0, 0.25, 0.75)
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.
@@ -1053,8 +1247,12 @@ Item {
       text: {
         if (!scene) return ""
         var d = Qt.formatDate(root.todToDate(scene.tod), "dddd d MMMM")
-        var where = root.loc && root.loc.name ? root.loc.name : ""
-        return where ? d + "   \u00b7   " + where : d
+        // A city alone means nothing once a VPN can drop you anywhere; the
+        // country is dropped rather than shown blank when a lookup lacks it.
+        var parts = [d]
+        if (root.loc && root.loc.name) parts.push(root.loc.name)
+        if (root.loc && root.loc.country) parts.push(root.loc.country)
+        return parts.join("   \u00b7   ")
       }
     }
 

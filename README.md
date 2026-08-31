@@ -74,9 +74,13 @@ touch code.
 
 ## A real sky
 
-The scene is driven by actual data, resolved in QML and handed to the shader as
-two vec4s. The shader does no lookups and holds no arrays — deliberately, since
-the GLSL 120 target rejects them (see the note atop `aurora.frag`).
+The scene is driven by actual data, resolved in QML and handed to the shader as a
+handful of vec4s. The shader does no lookups and holds no arrays — deliberately,
+since the GLSL 120 target rejects them (see the note atop `aurora.frag`).
+
+Members added to the uniform block must go **last**. Anything inserted mid-block
+is silently never written, which looks exactly like a shader bug and is not one.
+The block currently ends `… ice, land, geo` and runs to 368 bytes.
 
 **Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
 uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
@@ -151,27 +155,117 @@ With **no** location configured it follows your IP, and **every summon forces a
 fresh lookup** — change a VPN, reopen, and you are somewhere else. The cached
 location is treated as where you *were*, never as the answer, so it is always
 re-verified on load. A jump of more than about 20 km throws away the cached
-forecast instead of showing the old city's weather under the new name. `auroraFloor` and `palette` live
-in the same entry.
+forecast instead of showing the old city's weather under the new name. Changing
+the configured place also drops the elevation ring and the climate figure, which
+belong to where you were. `auroraFloor` and `palette` live in the same entry.
+
+The label reads **date · city · country** — `Sunday 30 August · Montreal · Canada`.
+The country comes from the same responses the city does (wttr.in's `country`,
+the geocoder's `country`) and is simply left off when a lookup does not supply
+one, rather than showing a trailing separator.
 
 ### The land follows the place
 
-The ground is not one painted scene. Four scalars are derived from data already
-fetched — mean temperature, rainfall, elevation and latitude — and the shader
-blends between them rather than switching between named biomes, because the world
-has no hard edges:
+The ground is not one painted scene. Six scalars are derived from data about the
+place, and the shader blends between them rather than switching between named
+biomes, because the world has no hard edges:
 
-| | drives |
-|---|---|
-| `cold` | conifers sharpen, the treeline thins, water runs to steel |
-| `arid` | ground goes to sand, trees disappear |
-| `lush` | deep saturated canopy, rounder crowns, water toward turquoise |
-| `alpine` | bare rock, and snow on the tops regardless of today's weather |
+| | from | drives |
+|---|---|---|
+| `cold` | mean temperature, latitude | conifers sharpen, the treeline thins, water runs to steel |
+| `arid` | aridity index | ground goes to sand, trees disappear |
+| `lush` | aridity index, temperature | deep saturated canopy, rounder crowns, water toward turquoise |
+| `alpine` | elevation | bare rock, and snow on the tops regardless of today's weather |
+| `relief` | elevation ring | how high and how jagged the skyline stands |
+| `water` | elevation ring, aridity index | whether there is a lake at all |
 
-Measured across real places: Dubai 35.0 °C and 0.00 mm/day gives `arid 1.00`;
-Singapore 28.0 °C and 2.82 mm/day gives `lush 1.00`; Zermatt at 1608 m gives
-`alpine 0.39`. Tree shape is a single exponent on the silhouette — high for
-conifers, low for a rounded canopy — so the whole difference costs one `pow`.
+**Aridity is a climate, not a fortnight.** Asking the 23-day forecast window put
+Phoenix at 2.66 mm/day — a monsoon burst — and grew it a lush green lakeside. A
+year of the reanalysis archive answers properly, and the measure is the UN's
+aridity index, precipitation over potential evapotranspiration. The ratio also
+cancels out the model's habit of over-raining on deserts, which a plain rainfall
+total does not:
+
+| | P | PET | P/PET |
+|---|---|---|---|
+| Sahara | 14 mm | 2616 mm | **0.01** |
+| Dubai | 353 mm | 2012 mm | **0.18** |
+| Phoenix | 493 mm | 1808 mm | **0.27** |
+| Zermatt | 832 mm | 932 mm | **0.89** |
+| Montreal | 1027 mm | 858 mm | **1.20** |
+
+**Relief comes from one request.** `api.open-meteo.com/v1/elevation` takes
+comma-separated coordinate lists, so a nine-point ring at roughly 50 km costs a
+single call, and the spread across it is the skyline:
+
+| | ring spread | `relief` | skyline |
+|---|---|---|---|
+| Montreal | 142 m | 0.09 | flat, a low treeline |
+| Dubai | 266 m | 0.20 | low coast |
+| Phoenix | 302 m | 0.23 | shallow hills |
+| Tromso | 855 m | 0.69 | fjord ridges |
+| Zermatt | 2213 m | 1.00 | jagged, crags on the crest |
+
+Relief scales the ridge harmonics as well as its height, because a plain has to
+read as a nearly straight horizon rather than as a shrunken mountain range. Both
+ends are held: the ridge may not dip below the waterline, and may not wall off
+the sky — this is a skyline, and the sky is most of what it is for.
+
+**Where there is no water, a sand sea.** The lake used to be unconditional; the
+Sahara got one. Sea shows up in the ring as points at zero elevation, but lakes
+and rivers sit above sea level, so standing water inland is inferred from the
+climate instead. Dubai is drier than Phoenix and still keeps its water, because
+the ring finds the Gulf; Phoenix is semi-arid with no sea in reach and gets
+dunes.
+
+The dunes are crest lines running across the sand, crowding toward the horizon —
+distance along a ground plane goes as 1/depth, and getting that backwards drew
+fine corduroy at the viewer's feet instead. A low sun rakes across them and the
+relief is everything; at noon it flattens out, which is how a dune field
+actually looks. One tap of the sky does double duty: the light the sand is
+bathed in, and, where it is hot enough, the mirage along the far edge — a mirage
+being nothing but a false reflection. The lake spends five taps there; this
+spends one.
+
+Tree shape is a single exponent on the silhouette — high for conifers, low for a
+rounded canopy, higher still and taller for palms on a hot wet coast. Drawn 170
+across, a tree is a few pixels tall, so shape can only mean proportion; that is
+enough to read as a palm, and it costs one `pow`.
+
+### Sunrise and sunset, where you actually are
+
+The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every day of
+the year — `dayPhase = (td - 0.25) * 2.0`, hard-coded in two places. It now comes
+from `daily=sunrise,sunset,daylight_duration` on the forecast request already
+being made, so it costs no extra call, and arrives as local wall-clock time under
+the existing `timezone=auto`.
+
+Two things follow from the day length, and getting only the first is worse than
+getting neither:
+
+- **When** the sun is up — a piecewise map onto the same 0..1-across-daylight
+  axis, so `day`, `gold`, `night`, the arc, the cloud underlight and the water's
+  glitter all keep working unchanged.
+- **How high** it gets. Scaling only the duration gave a polar night a brief
+  blazing noon, because the sine still reached full height inside its short day.
+  `sin(altitude)` has the form `A + B cos(hour angle)`, and the day length fixes
+  `A/B` on its own — the sun is up exactly while the cosine clears `-A/B`.
+
+Normalised so a twelve-hour day still peaks at exactly 1.0, which is the look
+this grew out of:
+
+| | day length | peak altitude | hours above horizon |
+|---|---|---|---|
+| equinox | 12.0 h | 1.000 | 12.0 |
+| Dubai, August | 12.7 h | 1.012 | 12.7 |
+| Tromso, August | 15.6 h | 1.049 | 15.6 |
+| Montreal, December | 9.0 h | **0.617** | 9.0 |
+| polar night | — | 0.008 | 0.9 |
+| polar day | — | 1.081 | 23.0 |
+
+A winter sun now stays low all day, which the fixed model could never show.
+Scrubbing the 23-day window shows the day length itself shortening by about nine
+minutes a day.
 
 ### Time passes
 
@@ -366,268 +460,6 @@ winding backwards through a whole day. The shader wraps it with `fract()`.
 avg, this build at night 1075 MHz — the cycle is free when it is dark. Daytime is
 1080 MHz, because the aurora's three curtain layers switching off very nearly
 pays for the cloud deck switching on.
-
-## A real sky
-
-The scene is driven by actual data, resolved in QML and handed to the shader as
-two vec4s. The shader does no lookups and holds no arrays — deliberately, since
-the GLSL 120 target rejects them (see the note atop `aurora.frag`).
-
-**Weather.** Open-Meteo hourly (the source Omarchy's own weather panel already
-uses), `past_days=1&forecast_days=3` — 96 samples in local time, aligned to the
-`tod` axis. `past_days=7&forecast_days=16` (16 is the API maximum) gives **552
-hourly samples across 23 days** — a week back, a fortnight forward — for about
-21 KB. The scrub is clamped to that window, derived from the data rather than
-hard-coded, and `resolveSky` refuses to report weather outside it, so the drag
-never invents a forecast it does not hold.
-
-Note the Kp forecast only runs ~3 days ahead. Beyond that the aurora falls back to
-its floor and the readout shows `Kp —` rather than guessing. Scrub across the day and the sky changes with the forecast: cloud
-cover closes the deck, rain and snow fall in front of everything, thunder bruises
-the cloud and fires irregular flashes. Location comes from wttr.in by IP, the same
-chain the bar widget uses. Cached to `~/.local/state/omarchy/borealis-sky.json`
-and refreshed at most every 30 minutes. **Offline, everything is zero and the
-scene renders exactly as it would without the feature** — no error state on screen.
-
-**Aurora, only when it is real.** NOAA's Kp forecast is small and *time-indexed at
-3 h resolution*, so it moves with the scrub — unlike the OVATION grid, which is
-923 KB and a single "now" snapshot that cannot answer *at what time tonight*. Your
-geographic position is converted to geomagnetic latitude and compared against the
-auroral oval, whose equatorward edge sits near `66.5 - 2*Kp` degrees:
-
-    prob = smoothstep(0, 10, magLat - (66.5 - 2*Kp - 8))
-
-Never quite zero — `auroraFloor` (default 0.12, settable per-plugin in
-`shell.json`) keeps a ghost of it on quiet nights so the screensaver stays itself.
-
-**Clouds sit on top of the aurora**, because the aurora is 100 km up and the
-weather is not. The curtain colour is held in a variable and fed forward, so the
-cloud deck is lit *from above* by it and the ridge is bathed in it. An overcast
-auroral night reads as glowing cloud, not a hidden aurora.
-
-**The moon.** A flat clean disc — deliberately not shaded like a sphere, which
-read as modelled rather than minimal — carrying only a whisper of maria, plus a
-soft **22-degree halo** thrown out at 3.3x its radius, stronger through thin cloud
-because that is when you actually see one.
-
-**The moon is accurate.** Phase from the synodic cycle drives a real terminator
-(`x > cos(2*pi*phase) * sqrt(1-y^2)`, mirrored when waning), so crescent, quarter,
-gibbous and full all render properly, with earthshine as a ghost on the dark limb.
-Its *position* comes from the same phase — the moon's offset from the sun **is**
-its phase, so a new moon rides with the sun and a full moon opposes it. Apparent
-size follows the anomalistic cycle, so a perigee full moon is visibly bigger.
-
-### Motion blur
-
-Scrub fast and the stars smear along their arcs. The blur works by winding the
-vault's **rotation** back and forth across seven taps, not by sliding the sample
-point — sliding lands each tap on a different cell of the hash field, so seven
-unrelated stars pile up dimly instead of one star drawing its path. Turning the
-angle traces the same star, and the smear comes out tangential and longer further
-from the pole for free. Speed is tracked in QML, rises instantly on a flick and is
-eased back down by a timer, so a stop clears rather than freezing mid-trail. Below
-a threshold there is one tap and no cost.
-
-### Choosing a location
-
-By default the location comes from an IP lookup, the same chain Omarchy's weather
-widget uses. To point it somewhere else — which is the easiest way to see the
-interface in another climate — add either a place name or explicit coordinates to
-this plugin's entry in `~/.config/omarchy/shell.json`:
-
-    { "id": "local.borealis-touch", "location": "Reykjavik" }
-    { "id": "local.borealis-touch", "latitude": 64.15, "longitude": -21.94 }
-
-A name is geocoded once through Open-Meteo's geocoder (again, already used by
-Omarchy). Editing the file re-resolves immediately, and a cache belonging to a
-different place is discarded rather than trusted.
-
-With **no** location configured it follows your IP, and **every summon forces a
-fresh lookup** — change a VPN, reopen, and you are somewhere else. The cached
-location is treated as where you *were*, never as the answer, so it is always
-re-verified on load. A jump of more than about 20 km throws away the cached
-forecast instead of showing the old city's weather under the new name. `auroraFloor` and `palette` live
-in the same entry.
-
-### The land follows the place
-
-The ground is not one painted scene. Four scalars are derived from data already
-fetched — mean temperature, rainfall, elevation and latitude — and the shader
-blends between them rather than switching between named biomes, because the world
-has no hard edges:
-
-| | drives |
-|---|---|
-| `cold` | conifers sharpen, the treeline thins, water runs to steel |
-| `arid` | ground goes to sand, trees disappear |
-| `lush` | deep saturated canopy, rounder crowns, water toward turquoise |
-| `alpine` | bare rock, and snow on the tops regardless of today's weather |
-
-Measured across real places: Dubai 35.0 °C and 0.00 mm/day gives `arid 1.00`;
-Singapore 28.0 °C and 2.82 mm/day gives `lush 1.00`; Zermatt at 1608 m gives
-`alpine 0.39`. Tree shape is a single exponent on the silhouette — high for
-conifers, low for a rounded canopy — so the whole difference costs one `pow`.
-
-### Time passes
-
-Left alone the sky drifts forward at about **one sky-hour per real minute**, so
-you look up and the day has moved. Touching it cancels the drift and returns to
-the true now: idle is ambience, touched is truth — and since the readout is hidden
-while it drifts, nothing on screen ever lies.
-
-### The timeline strip
-
-While scrubbing, a strip low on screen shows the hours around you as coloured
-segments — clear, cloud, rain, snow, storm — with midnight dividers, a tick for
-the real clock, and a playhead. The strip scrolls; the playhead does not, so the
-moment you are looking at is always dead centre. It answers "when will it rain"
-at a glance, which is the one thing scrubbing alone could never do.
-
-### Winter
-
-Whether snow *settles* is a different question from whether it is falling, and
-the data answers both:
-
-| Look | Source |
-|---|---|
-| Snow in the air | `snowfall` |
-| Landscape white | **`snow_depth`** — falling snow that melts leaves this at zero |
-| Frozen lake | trailing 72 h mean of `temperature_2m`, from the past days already fetched |
-| Verglas | freezing-rain codes, or liquid precipitation onto sub-zero `soil_temperature_0cm` |
-
-A frozen lake loses its ripple, its shimmer and its mirror — and gives nothing
-back to a finger pushed across it, because ice does not ripple. Snow and ice are
-lit by whatever light is up, moon included: keying them to daylight alone made
-winter vanish at night, which is exactly backwards for a high-albedo surface.
-
-### Wind, glitter, fog
-
-Cloud drifts on the **real** wind (`wind_speed_10m` / `wind_direction_10m`),
-reversing when the wind does, and rain and snow lean with it. A low sun or moon
-lays a broken **glitter column** across the water, using the water's own facet
-noise as a slope proxy. Fog gets its own low veil rather than being more cloud.
-Precipitation intensity is no longer floored, so drizzle looks like drizzle.
-
-### Gestures
-
-| Gesture | Result |
-|---|---|
-| Double tap, one finger | back to today |
-| Triple tap, one finger | leave |
-| Quick tap, two fingers (no movement) | next palette |
-| Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
-| **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
-| Press, hold or drag | push the light around |
-| Any key | dismiss |
-
-The two-finger gestures cannot collide: the palette tap requires *no* movement,
-the inspect tap requires the first finger to already be dragging.
-
-The readout stays hidden until a scrub actually begins — resting a finger on the
-glass leaves the sky clean. Once moving, it names the moment: condition and
-temperature on top, and the day being explored — `Saturday 29 August` — smaller
-and quieter beneath.
-
-`todGain` sets how many days a full-width drag covers (2.5). At that rate a pixel
-is about two minutes of forecast, far finer than the hourly data, while the whole
-23-day window is nine swipes wide.
-
-Letting go **keeps** the hour you landed on, so a forecast can actually be read.
-Double tap comes home to the real present; triple tap leaves. A single tap does
-nothing on purpose — this is a screensaver you can park a forecast in, so leaving
-should be deliberate. Any key still exits immediately.
-
-While you are parked away from now, the readout and the strip stay faintly
-visible, so a held forecast always says which moment it is showing.
-
-**Cost.** Measured back to back on AC: previous build 1048 MHz GPU avg, this one
-1093 MHz — about +4.3% for the whole feature. Precipitation composites in `main()`
-after the branch, so it costs once per pixel rather than five times through the
-water's reflection taps, and every weather block is guarded on a uniform, so clear
-weather pays almost nothing.
-
-## Considered and rejected: a real star catalogue
-
-Prototyped properly before deciding, against the HYG catalogue with real
-astronomy (sidereal time, RA/Dec to alt/az) for this location and time. It works,
-and it still is not worth adopting. Recorded so it does not get re-investigated:
-
-- **Half the sky is missing.** The scene faces south — the sun rises at the left
-  edge — so the window spans azimuth 90 to 270. Measured at Montreal on a late
-  August evening: **2118 of the 4246 stars above the horizon fall inside it, 50%**.
-  Everything northern is behind the viewer, so the Plough, Cassiopeia and Polaris
-  never appear. Those are the shapes people actually recognise.
-- **A dead band across the top.** Altitude 90 maps to y = 0.175, so the top 17% of
-  the frame is above the zenith and permanently empty.
-- **Shapes stretch.** 180 degrees of sky across the width pulls the Summer
-  Triangle into a long diagonal, with Deneb off-frame entirely.
-
-Narrowing to a 120-degree window with altitude capped at 72 fixes all three and
-looks genuinely good — the frame fills and the Milky Way's real clumping shows.
-But the sun rises at azimuth 90 and sets at 270, both **outside** that window, so
-sunrise and sunset would happen off-screen and the moon would spend much of the
-night out of frame. That is not "add real stars", it is re-aiming the camera the
-whole day cycle is built on.
-
-The hash field costs nothing, fills the frame, and never has a dead band. The
-scene is a mood piece, not a planetarium.
-
-## Developing this plugin: clear the QML cache
-
-Quickshell caches compiled QML in `~/.cache/quickshell/qmlcache`, and it will
-happily serve a **stale** component after you edit a plugin. Symptom: your edits
-appear to do nothing at all — not a wrong result, no result, as if the file were
-never touched. Clearing `~/.cache/qtshadercache-*` alone is not enough.
-
-    rm -rf ~/.cache/quickshell ~/.cache/qtshadercache-*
-    omarchy-restart-shell
-
-Also note `open()` calls `clearSlots()`. If you pin a touch slot to a literal for
-testing, pin it *inside* `clearSlots()` — a pinned property default is wiped the
-moment the overlay is summoned, which looks exactly like the uniform never
-arriving.
-
-## Rebuilding the shader
-
-`qsb` ships in `qt6-shadertools` but is not on `PATH`:
-
-    export PATH="$PATH:/usr/lib/qt6/bin"
-    qsb --glsl "100es,120,150" --hlsl 50 --msl 12 \
-        -o shaders/aurora.frag.qsb shaders/aurora.frag
-
-Those targets match upstream's. Tuning lives at the top of `aurora.frag`:
-`PUSH_AMP`/`PUSH_SIGMA` (how hard and how tightly a finger shoves the light),
-`COMPRESS` (divergence into brightness), `WAVE_AMP`/`WAVE_K` (ring depth and
-spacing), and `RELAX_TAU`/`RELAX_OMEGA`/`RELAX_LIFE` (the spring-back). **Never introduce a const array or a
-dynamically-indexed array**: the GLSL 120 target rejects them at runtime with
-`C7516: OpenGL does not allow constant arrays` and a blank overlay, while qsb
-itself compiles clean. That is why the touch slots are three separate `vec4`
-uniforms rather than an array, mirroring how upstream passes its palette.
-
-## Palette
-
-As upstream — set `palette` on this plugin's entry in `~/.config/omarchy/shell.json`
-(`aurora` | `ember` | `gold` | `nord` | `ice`):
-
-    { "id": "local.borealis-touch", "palette": "nord" }
-
-## History
-
-    git -C ~/.config/omarchy/plugins/local.borealis-touch log --oneline --decorate
-
-`main` carries everything: the night interaction and the dawn drag. The
-night-only build — repulsion field, spring-back, palette cycle, no dawn — is kept
-at the tag **`working-night`**, which is the thing to go back to if the dawn work
-ever needs undoing:
-
-    git switch -d working-night     # look at it
-    git switch -c night-only working-night   # or branch from it
-
-Whenever you move between these, the shader on disk changes and **Quickshell will
-not notice** — it serves its cached QML instead. Clear the cache and restart:
-
-    rm -rf ~/.cache/quickshell ~/.cache/qtshadercache-*
-    omarchy-restart-shell
 
 ### The dawn drag
 
