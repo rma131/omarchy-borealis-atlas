@@ -920,7 +920,9 @@ Item {
 
   function close() {
     root.opened = false
+    root.mapDragging = false
     root.mapOpen = false
+    root.mapReveal = 0
   }
 
   function dismiss() {
@@ -1232,10 +1234,21 @@ Item {
       anchors.fill: parent
       maximumTouchPoints: 3
       mouseEnabled: true
-      // Not merely guarded — disabled. The early returns below stop it acting
-      // on a touch, but a MultiPointTouchArea can *grab* one before the map's
-      // MouseArea is ever offered it, and then the map would take no taps.
-      enabled: !root.mapOpen
+      // Everything goes through here, the map included. MouseArea does not see
+      // a finger on this setup — every way out of the map was wired through one
+      // and none of them fired, so the sheet opened and trapped you. This is
+      // the one input path proven to work, because the scrub uses it.
+
+      // map bookkeeping, kept apart from the scene gesture state
+      property bool mapGesture: false
+      property real mapStartX: 0
+      property real mapStartY: 0
+      property real mapDist: 0
+
+      function inItem(item, x, y) {
+        var p = touchArea.mapToItem(item, x, y)
+        return p.x >= 0 && p.x <= item.width && p.y >= 0 && p.y <= item.height
+      }
 
       // press bookkeeping for the tap-vs-hold decision, first point only
       property int gestureId: -1
@@ -1260,7 +1273,15 @@ Item {
       }
 
       onPressed: function(points) {
-        if (root.mapOpen) return
+        if (root.mapOpen) {
+          if (!touchArea.mapGesture && points.length > 0) {
+            touchArea.mapGesture = true
+            touchArea.mapStartX = points[0].x
+            touchArea.mapStartY = points[0].y
+            touchArea.mapDist = 0
+          }
+          return
+        }
         // A second finger arriving while the first is already dragging is the
         // inspect tap. The palette gesture cannot collide with it: that one
         // requires a quick two-finger tap with no movement at all.
@@ -1288,7 +1309,18 @@ Item {
       }
 
       onUpdated: function(points) {
-        if (root.mapOpen) return
+        if (root.mapOpen) {
+          if (!touchArea.mapGesture || points.length === 0) return
+          var mdy = points[0].y - touchArea.mapStartY
+          var mdx = points[0].x - touchArea.mapStartX
+          touchArea.mapDist = Math.max(touchArea.mapDist, Math.sqrt(mdx * mdx + mdy * mdy))
+          // dragging the sheet back down is the mirror of pulling it up
+          if (root.mapDragging || (mdy > root.dragPx && mdy > Math.abs(mdx))) {
+            root.mapDragging = true
+            root.mapReveal = Math.max(0, Math.min(1, 1 - mdy / (height * 0.30)))
+          }
+          return
+        }
         for (var i = 0; i < points.length; i++) {
           var pt = points[i]
           root.touchMove(pt.pointId, norm(pt, 0), norm(pt, 1))
@@ -1339,7 +1371,34 @@ Item {
       }
 
       onReleased: function(points) {
-        if (root.mapOpen) return
+        if (root.mapOpen) {
+          touchArea.mapGesture = false
+          if (root.mapDragging) {
+            root.mapDragging = false
+            root.mapOpen = root.mapReveal > 0.55
+            root.mapReveal = root.mapOpen ? 1 : 0
+            return
+          }
+          if (points.length === 0) return
+          // Pointing at a place can be sloppier than a double tap: nothing
+          // competes with it except the downward drag, which is directional.
+          if (touchArea.mapDist > root.tapSlopPx * 2) return
+          var mx = points[0].x, my = points[0].y
+          if (touchArea.inItem(closeChip, mx, my)) { root.mapOpen = false; return }
+          if (root.pickedLoc && touchArea.inItem(hereChip, mx, my)) {
+            root.unpickPlace(); root.mapOpen = false; return
+          }
+          if (touchArea.inItem(mapBox, mx, my)) {
+            var mp = touchArea.mapToItem(mapBox, mx, my)
+            root.pickPlace(90.0 - mp.y / mapBox.height * 180.0,
+                           mp.x / mapBox.width * 360.0 - 180.0)
+            root.mapOpen = false
+            return
+          }
+          // anywhere off the sheet puts it away, changing nothing
+          if (!touchArea.inItem(mapSheet, mx, my)) root.mapOpen = false
+          return
+        }
         for (var i = 0; i < points.length; i++)
           root.touchUp(points[i].pointId, norm(points[i], 0), norm(points[i], 1))
         touchArea.activeCount = Math.max(0, touchArea.activeCount - points.length)
@@ -1376,6 +1435,15 @@ Item {
       }
 
       onCanceled: function(points) {
+        // A cancelled touch used to leave mapDragging true, which disables the
+        // settling Behavior *and* the guard in onMapOpenChanged — the sheet
+        // then sat frozen part-way with nothing able to move it. That is a
+        // second way to be trapped, quite apart from the input routing.
+        if (touchArea.mapGesture || root.mapDragging) {
+          touchArea.mapGesture = false
+          root.mapDragging = false
+          root.mapReveal = root.mapOpen ? 1 : 0
+        }
         for (var i = 0; i < points.length; i++)
           root.touchUp(points[i].pointId, 0, 0)
         touchArea.activeCount = Math.max(0, touchArea.activeCount - points.length)
@@ -1535,9 +1603,9 @@ Item {
       anchors.fill: parent
       z: 50
       visible: root.mapReveal > 0.002
-      // only the settled sheet takes taps; a half-pulled one would swallow the
-      // finger that is still pulling it
-      enabled: root.mapOpen && !root.mapDragging
+      // Draws only. Input for the map is handled by the touch area beneath,
+      // which is the only thing here that a finger actually reaches.
+      enabled: false
 
       // the scrim comes in with the sheet rather than all at once
       Rectangle {
@@ -1545,12 +1613,6 @@ Item {
         color: "#070b14"
         opacity: 0.82 * root.mapReveal
       }
-      // tapping off the sheet puts it away without changing anything
-      MouseArea {
-        anchors.fill: parent
-        onClicked: root.mapOpen = false
-      }
-
       Item {
         id: mapSheet
         width: parent.width
@@ -1574,27 +1636,6 @@ Item {
           width: root.sceneH * 0.075; height: 4; radius: 2
           color: "#4e8f7a"; opacity: 0.55
         }
-        MouseArea {
-          anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-          height: root.sceneH * 0.055
-          drag.axis: Drag.YAxis
-          onClicked: root.mapOpen = false
-          property real pressY: 0
-          onPressed: function (m) { pressY = m.y }
-          onPositionChanged: function (m) {
-            if (!pressed) return
-            var d = m.y - pressY
-            if (d > 0) { root.mapDragging = true
-                         root.mapReveal = Math.max(0, 1 - d / (root.sceneH * 0.30)) }
-          }
-          onReleased: {
-            if (!root.mapDragging) return
-            root.mapDragging = false
-            root.mapOpen = root.mapReveal > 0.6
-            root.mapReveal = root.mapOpen ? 1 : 0
-          }
-        }
-
       Column {
         id: sheetCol
         anchors.horizontalCenter: parent.horizontalCenter
@@ -1684,37 +1725,49 @@ Item {
           }
         }
 
-        MouseArea {
-          anchors.fill: parent
-          onClicked: function (mouse) {
-            root.pickPlace(90.0 - mouse.y / height * 180.0,
-                           mouse.x / width * 360.0 - 180.0)
-            root.mapOpen = false
-          }
-        }
       }
 
-      // back to being wherever the machine actually is
-      Rectangle {
+      Row {
         anchors.horizontalCenter: parent.horizontalCenter
-        width: hereLabel.width + root.sceneH * 0.038
-        height: hereLabel.height + root.sceneH * 0.020
-        radius: height / 2
-        color: root.pickedLoc ? "#1e3550" : "#14202f"
-        border.color: root.pickedLoc ? "#4e8f7a" : "#243448"
-        border.width: 1
-        Text {
-          id: hereLabel
-          anchors.centerIn: parent
-          color: "#eaf0f8"
-          opacity: root.pickedLoc ? 0.92 : 0.45
-          font.pixelSize: Math.max(11, root.sceneH * 0.0165)
-          text: root.pickedLoc ? "Back to here" : "Following this machine"
+        spacing: root.sceneH * 0.018
+
+        // back to being wherever the machine actually is
+        Rectangle {
+          id: hereChip
+          width: hereLabel.width + root.sceneH * 0.038
+          height: hereLabel.height + root.sceneH * 0.020
+          radius: height / 2
+          color: root.pickedLoc ? "#1e3550" : "#14202f"
+          border.color: root.pickedLoc ? "#4e8f7a" : "#243448"
+          border.width: 1
+          Text {
+            id: hereLabel
+            anchors.centerIn: parent
+            color: "#eaf0f8"
+            opacity: root.pickedLoc ? 0.92 : 0.45
+            font.pixelSize: Math.max(11, root.sceneH * 0.0165)
+            text: root.pickedLoc ? "Back to here" : "Following this machine"
+          }
         }
-        MouseArea {
-          anchors.fill: parent
-          enabled: !!root.pickedLoc
-          onClicked: { root.unpickPlace(); root.mapOpen = false }
+
+        // There must always be an obvious way out. Everything else that closes
+        // the sheet is a gesture, and a gesture you have not been told about is
+        // indistinguishable from being stuck.
+        Rectangle {
+          id: closeChip
+          width: closeLabel.width + root.sceneH * 0.038
+          height: closeLabel.height + root.sceneH * 0.020
+          radius: height / 2
+          color: "#1e3550"
+          border.color: "#4e8f7a"
+          border.width: 1
+          Text {
+            id: closeLabel
+            anchors.centerIn: parent
+            color: "#eaf0f8"; opacity: 0.92
+            font.pixelSize: Math.max(11, root.sceneH * 0.0165)
+            text: "Close"
+          }
         }
       }
 

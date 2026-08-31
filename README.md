@@ -158,6 +158,23 @@ when you tap one. A chip under the map reads *Following this machine*, or *Back
 to here* once you have chosen somewhere, which clears the choice and lets
 detection resume.
 
+**Everything goes through the one `MultiPointTouchArea`, the map included.**
+`MouseArea` does not see a finger here. The map was first built with them — tap
+to pick, tap off to dismiss, drag the handle down to close — and *none* of it
+fired on the touchscreen, so the sheet opened and trapped you with no way out.
+The scrub proves `MultiPointTouchArea` receives touch, so that is the only input
+path the overlay uses; `mouseEnabled` makes it serve a mouse too, and the map
+layer itself is `enabled: false`, drawing only. Hit-testing is `mapToItem` into
+`mapBox`, `hereChip` and `closeChip` — verified by round-trip, a tap at
+Australia's centre resolving to lat −25.0, lon 135.0.
+
+A cancelled touch was a second, independent way to get stuck: it left
+`mapDragging` true, which disables both the settling `Behavior` and the guard in
+`onMapOpenChanged`, so the sheet froze part-way with nothing able to move it.
+`onCanceled` now clears it. And there is a plain **Close** button, because every
+other way out is a gesture, and a gesture you have not been told about is
+indistinguishable from being stuck.
+
 It was first built on *two fingers held still*, which was a mistake worth
 recording. That gesture required both fingers inside 12 px for 300 ms and lifted
 together, gave no feedback whatsoever, and in practice never fired — any tremor
