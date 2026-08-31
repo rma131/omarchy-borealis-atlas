@@ -148,6 +148,25 @@ guesswork at the best of times — ipinfo.io and ipwho.is both put that same
 address in *France* — so treat it as a good default rather than an authority,
 and set a location explicitly when it matters.
 
+**Or point at it.** Two fingers held still opens a world map over the scene;
+tap anywhere and the sky becomes that place. It is the only input a tablet-mode
+screensaver can rely on — no keyboard — and coarse precision is fine, because
+only latitude and longitude are wanted; the name is filled in afterwards by
+reverse geocoding (BigDataCloud, keyless over HTTPS), which even names the ocean
+when you tap one. A chip under the map reads *Following this machine*, or *Back
+to here* once you have chosen somewhere, which clears the choice and lets
+detection resume.
+
+The map is `world.js`: Natural Earth 110m land, public domain, exterior rings
+only, Douglas-Peucker at 0.55° and quantised to 0.1° — 50 landmasses, 1264
+points, 16 KB. It is embedded rather than fetched so the picker works offline
+and needs no asset, and it is drawn on a `Canvas` only while it is open.
+
+A picked place outranks both `shell.json` and the IP, and survives a restart in
+the same state file as the forecast. The touch area beneath is *disabled* while
+the map is up rather than merely guarded: a `MultiPointTouchArea` can grab a
+touch before the map's `MouseArea` is offered it.
+
 To point it somewhere else — which is the easiest way to see the
 interface in another climate — add either a place name or explicit coordinates to
 this plugin's entry in `~/.config/omarchy/shell.json`:
@@ -320,6 +339,7 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 | Gesture | Result |
 |---|---|
 | Double tap, one finger | roll back to today |
+| **Two fingers held still** | the world map, to choose where the sky is |
 | Triple tap, one finger | leave |
 | Quick tap, two fingers (no movement) | next palette |
 | Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
