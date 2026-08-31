@@ -34,8 +34,9 @@ layout(std140, binding = 0) uniform buf {
     vec4 touch0;
     vec4 touch1;
     vec4 touch2;
-    // Time of day as a fraction of 24 h: 0.00 midnight, 0.25 sunrise,
-    // 0.50 noon, 0.75 sunset. Seeded from the real clock, dragged left to right.
+    // Time of day as a fraction of 24 h: 0.00 midnight, 0.50 midday. Sunrise
+    // and sunset are not fixed — they come from geo.zw. Seeded from the real
+    // clock, dragged left to right.
     float tod;
     // Real sky data, resolved in QML so the shader needs no arrays or lookups.
     vec4 wx;      // x cloud cover, y rain, z snow, w thunder
@@ -46,7 +47,41 @@ layout(std140, binding = 0) uniform buf {
     // What the land here is like. Blended, not switched: the world has no hard
     // edges between a forest and a desert.
     vec4 land;    // x cold, y arid, z lush, w alpine
+    // Where the place is, as opposed to what its weather is. relief is the
+    // spread of elevation across ~100 km, water whether there is any, and the
+    // last two are the day's real sunrise and sunset as fractions of 24 h.
+    vec4 geo;     // x relief, y water, z sunrise, w sunset
 };
+
+// The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every
+// day of the year: dayPhase was simply (td - 0.25) * 2.0. This maps the real
+// sunrise and sunset onto the same 0..1-across-daylight axis, so everything
+// downstream — day, gold, night, the arc, the cloud underlight, the glitter —
+// keeps working unchanged and merely sits on a true day length.
+// The clamp is what makes the polar circles safe: a 0.96 day is a sun that
+// dips for an hour, which is what a Tromso June actually looks like.
+float solarPhase(float td) {
+  float dayLen = clamp(geo.w - geo.z, 0.04, 0.96);
+  float x = fract(td - geo.z);                     // 0 at sunrise
+  return (x < dayLen) ? x / dayLen
+                      : 1.0 + (x - dayLen) / (1.0 - dayLen);
+}
+
+// How high it gets, which is a separate question from when it is up. A short
+// winter day has to keep the sun low, and a polar night must never lift it above
+// the horizon at all. Scaling only the duration gave polar night a brief
+// blazing noon — worse than the fixed twelve-hour day it replaced.
+// sin(altitude) has the form A + B cos(hour angle), and the day length fixes
+// A/B on its own, because the sun is up exactly while the cosine clears -A/B.
+float solarAlt(float td) {
+  float f   = clamp(geo.w - geo.z, 0.0, 1.0);
+  float mid = (geo.z + geo.w) * 0.5;               // local solar noon
+  float c0  = cos(3.14159265 * f);
+  // Normalised so a twelve-hour day still peaks at exactly 1.0 — the look this
+  // grew out of — while the summer end is held back enough that a midnight sun
+  // cannot climb out of the top of the frame.
+  return (cos(6.28318531 * (td - mid)) - c0) / (1.0 + max(-c0, 0.0) * 0.85);
+}
 
 const float WATERLINE = 0.82;
 const float HORIZON  = 0.795;   // where sun and moon cross
@@ -312,22 +347,24 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   // tod is unbounded (QML lets it run past 1 so a drag through midnight does
   // not animate backwards through the whole day); wrap it for positions.
   float td        = fract(tod);
-  float dayPhase  = (td - 0.25) * 2.0;
-  float sunAlt    = sin(dayPhase * 3.14159265);
-  vec2  sunUV     = vec2(mix(0.10, 0.90, dayPhase), HORIZON - sunAlt * SUN_ARC);
+  float dayPhase  = solarPhase(td);
+  float sunAlt    = solarAlt(td);
+  vec2  sunUV     = vec2(mix(0.10, 0.90, clamp(dayPhase, 0.0, 1.0)),
+                         HORIZON - sunAlt * SUN_ARC);
 
   // The moon's offset from the sun IS its phase: new rides with the sun, full
   // opposes it, first quarter transits at 18:00. The old fract(td + 0.5)
   // silently assumed a full moon every night.
   float lunar     = astro.x;
-  float moonDay   = (fract(td - lunar) - 0.25) * 2.0;
-  float moonAlt   = sin(moonDay * 3.14159265);
-  vec2  moonUV    = vec2(mix(0.10, 0.90, moonDay), HORIZON - moonAlt * SUN_ARC);
+  float moonDay   = solarPhase(fract(td - lunar));
+  float moonAlt   = solarAlt(fract(td - lunar));
+  vec2  moonUV    = vec2(mix(0.10, 0.90, clamp(moonDay, 0.0, 1.0)),
+                         HORIZON - moonAlt * SUN_ARC);
 
   float day   = smoothstep(-0.04, 0.32, sunAlt);        // 1 in full daylight
   // Snow and ice are bright under a moon, so winter is lit by whatever light is
   // actually up. Keying it to `day` alone made winter disappear at night.
-  float moonLit = smoothstep(-0.05, 0.15, sin(((fract(td - astro.x)) - 0.25) * 2.0 * 3.14159265))
+  float moonLit = smoothstep(-0.05, 0.15, solarAlt(fract(td - astro.x)))
                 * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5));
   float lit = max(day, moonLit * 0.60);
   float gold  = exp(-sunAlt * sunAlt * 26.0);           // the golden-hour band
@@ -490,23 +527,45 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
 
   // forested ridge standing on the waterline
   float fx = uv.x;
+  // Relief scales the harmonics as well as the overall height, because a plain
+  // has to read as a nearly straight horizon rather than as a shrunken mountain
+  // range. Measured from the spread of elevation across ~100 km, so Montreal
+  // comes out flat, Phoenix hilly and Zermatt jagged, instead of all three
+  // sharing the one amplitude this used to hard-code.
+  float rel = geo.x;
+  float amp = mix(0.30, 1.15, rel);
   float ridge = 0.5
-    + 0.30 * sin(fx * 3.1 + 0.6)
-    + 0.12 * sin(fx * 7.7 + 2.0)
-    + 0.06 * sin(fx * 15.3 + 4.1);
-  ridge /= 0.98;
-  float ridgeTop = WATERLINE - ridge * 0.20;
+    + (0.30 * sin(fx * 3.1 + 0.6)
+     + 0.12 * sin(fx * 7.7 + 2.0)
+     + 0.06 * sin(fx * 15.3 + 4.1)) * amp;
+  ridge += 0.05 * rel * abs(sin(fx * 23.0 + 1.3));   // crags, only where rugged
+  // At full relief the harmonics swing far enough to put the ridge underwater
+  // on one side and off the top of the screen on the other; both ends are held.
+  ridge = clamp(ridge / 0.98, 0.06, 1.05);
+  // The floor keeps a readable far shore rather than a hairline: even flat
+  // country has a horizon you can see. The ceiling stops the Alps walling the
+  // sky off — this is a skyline, and the sky is most of what it is for.
+  float ridgeTop = WATERLINE - ridge * mix(0.09, 0.26, rel);
 
   float tw = 170.0;
   float cell = floor(fx * tw);
   float hcell = hash21(vec2(cell, 3.7));
+  // A hot wet coast grows palms. Drawn 170 across, a tree is a few pixels tall,
+  // so shape can only mean proportion: taller, thinner and standing further
+  // apart is the whole of what survives, and it is enough to read as a palm.
+  // Genuinely hot, not merely green: lush reaches 0.72 around a 21 C mean, and
+  // below that a temperate lakeside was growing palms.
+  float palm = clamp((land.z - 0.72) * 3.0, 0.0, 1.0) * (1.0 - land.x) * geo.y;
   // Dry ground, bare rock and hard cold all thin the treeline out.
-  float bare = clamp(0.12 + 0.80 * max(land.y, land.w) + 0.40 * land.x, 0.0, 0.97);
+  float bare = clamp(0.12 + 0.80 * max(land.y, land.w) + 0.40 * land.x
+                     + 0.25 * palm, 0.0, 0.97);
   float grow = (1.0 - land.y) * (1.0 - 0.85 * land.w) * (0.45 + 0.75 * land.z);
-  float th = (hcell < bare) ? 0.0 : (0.004 + 0.012 * hcell) * clamp(grow, 0.15, 1.4);
+  float th = (hcell < bare) ? 0.0
+           : (0.004 + 0.012 * hcell) * clamp(grow, 0.15, 1.4) * (1.0 + 1.3 * palm);
   // Conifers come to a point where it is cold or high; broadleaf and palm
   // canopies are rounder, so the exponent carries the whole difference.
   float shp = mix(0.55, 2.3, clamp(land.x + land.w * 0.7, 0.0, 1.0));
+  shp = mix(shp, 3.6, palm);
   float spike = pow(max(1.0 - abs(fract(fx * tw) * 2.0 - 1.0), 0.0), shp);
   float silTop = ridgeTop - th * spike;
 
@@ -532,7 +591,8 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     mtn += auroraCol * 0.30;   // the land is bathed in it, not lit past it
 
     // Height keeps its own snow, quite apart from today's weather.
-    float capAmt = clamp((land.w - 0.22) * 1.7, 0.0, 1.0) * exp(-into * 3.2);
+    float capAmt = clamp((land.w - 0.22) * 1.7, 0.0, 1.0)
+                 * (0.35 + 0.65 * rel) * exp(-into * 3.2);
     if (capAmt > 0.0)
       mtn = mix(mtn, vec3(0.88, 0.91, 0.96) * (0.16 + 0.84 * lit), capAmt * 0.88);
 
@@ -571,12 +631,14 @@ void main() {
 
   // where the light is, for the water's glitter column and the fog's colour
   float td       = fract(tod);
-  float dayPhase = (td - 0.25) * 2.0;
-  float sunAlt   = sin(dayPhase * 3.14159265);
-  vec2  sunUV    = vec2(mix(0.10, 0.90, dayPhase), HORIZON - sunAlt * SUN_ARC);
-  float moonDay  = (fract(td - astro.x) - 0.25) * 2.0;
-  float moonAlt  = sin(moonDay * 3.14159265);
-  vec2  moonUV   = vec2(mix(0.10, 0.90, moonDay), HORIZON - moonAlt * SUN_ARC);
+  float dayPhase = solarPhase(td);
+  float sunAlt   = solarAlt(td);
+  vec2  sunUV    = vec2(mix(0.10, 0.90, clamp(dayPhase, 0.0, 1.0)),
+                        HORIZON - sunAlt * SUN_ARC);
+  float moonDay  = solarPhase(fract(td - astro.x));
+  float moonAlt  = solarAlt(fract(td - astro.x));
+  vec2  moonUV   = vec2(mix(0.10, 0.90, clamp(moonDay, 0.0, 1.0)),
+                        HORIZON - moonAlt * SUN_ARC);
   float day      = smoothstep(-0.04, 0.32, sunAlt);
   float moonLit  = smoothstep(-0.05, 0.15, moonAlt)
                  * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5));
@@ -584,7 +646,10 @@ void main() {
 
   vec3 col;
 
-  if (uv.y >= WATERLINE) {
+  // A lake in the Sahara was the last thing in the scene that ignored where you
+  // are. Wet or dry is a property of the place, not something that animates, so
+  // this is a hard branch and neither path ever costs the other anything.
+  if (uv.y >= WATERLINE && geo.y > 0.35) {
     // water: stretched mirror of the upper scene, rippled, gust-blurred,
     // shimmer-broken, darkening with depth
     float depth = (uv.y - WATERLINE) / (1.0 - WATERLINE);
@@ -656,6 +721,69 @@ void main() {
       vec3 iceCol = mix(col, vec3(0.62, 0.70, 0.80) * (0.14 + 0.86 * lit), 0.78);
       col = mix(col, iceCol, ice.x);
     }
+  } else if (uv.y >= WATERLINE) {
+    // ---- a sand sea, where there is no water to mirror --------------------
+    // near = 0 at the horizon, 1 at the bottom of the screen.
+    float near = (uv.y - WATERLINE) / (1.0 - WATERLINE);
+    // Crest lines run across the sand and crowd toward the horizon. Distance
+    // along a ground plane goes as 1/depth, which is what makes them crowd;
+    // pow(near, k) does the exact opposite and drew fine corduroy at the
+    // viewer's feet instead. Each line wanders in x, more so nearby where
+    // there is room for it, so the field does not read as a ruler.
+    float persp = 1.0 / (0.085 + near * 0.92);
+    float wob   = 0.30 * sin(uv.x * 4.1 + 0.7) + 0.15 * sin(uv.x * 8.3 + 2.9)
+                + 0.07 * sin(uv.x * 15.7 + 1.4);
+    // the wander must not die at the horizon or the far crests draw as rules
+    float h     = fract(persp * 0.62 + wob * (0.35 + 0.65 * near));
+
+    // A dune is not a sine: the windward side climbs slowly over most of the
+    // spacing and the lee face drops away in one steep shadowed step.
+    float face = smoothstep(0.02, 0.68, h) - 0.85 * smoothstep(0.68, 0.88, h);
+    // a low sun rakes across them and the relief is everything; overhead it
+    // flattens out, which is exactly how a dune field looks at noon
+    float rake = 0.34 + 0.58 * (1.0 - smoothstep(0.05, 0.55, sunAlt));
+    // Where the rows compress past a pixel the crest lines alias into a moire
+    // of hairlines, so the relief is faded out into the distance instead.
+    rake *= smoothstep(0.0, 0.18, near);
+    float shade = 1.0 + (face - 0.45) * rake;
+
+    // and a slight bias toward wherever the light actually is, so the field has
+    // a direction rather than being lit from nowhere
+    float sAd = smoothstep(-0.02, 0.12, sunAlt);
+    float mAd = smoothstep(-0.02, 0.12, moonAlt) * (1.0 - day * 0.75);
+    vec2  lUV = (sAd >= mAd) ? sunUV : moonUV;
+    float toL = clamp((lUV.x - uv.x) * 2.2, -1.0, 1.0);
+    shade *= 1.0 + 0.12 * toL * sin(uv.x * 4.1 + 0.7);
+
+    // Sand at noon is bright, but the far sand has to meet the ridge's own
+    // ground colour or the old waterline shows as a hard seam across the
+    // desert. Distance hazes it toward that tone, which is both the fix and
+    // what atmospheric perspective actually does.
+    float toward = smoothstep(0.0, 0.45, near);
+    vec3 sand  = mix(vec3(0.46, 0.41, 0.30), vec3(0.80, 0.70, 0.51), toward);
+    vec3 stony = mix(vec3(0.40, 0.39, 0.36), vec3(0.66, 0.63, 0.57), toward);
+    sand = mix(sand, stony, land.x);
+    vec3 nightSand = mix(vec3(0.055, 0.062, 0.095), vec3(0.028, 0.032, 0.052), near);
+    col = mix(nightSand, sand, day) * shade;
+
+    // One tap of the sky, doing two jobs: the light the sand is bathed in, and
+    // — where it is hot enough — the mirage, which is nothing but a false
+    // reflection. The lake spends five taps here; this spends one.
+    vec2 muv = vec2(uv.x, WATERLINE - (uv.y - WATERLINE) * 3.2);
+    muv.x += 0.004 * sin(uv.y * 40.0 + t * 2.6);
+    muv.x += screenFld.x * 0.22;
+    vec3 sky1 = upperScene(clamp(muv, 0.0, 1.0), t, fieldParams(screenFld, aspect));
+    float band = exp(-near * 9.0);                 // hugs the far edge
+    float heat = clamp((1.0 - land.x) * land.y, 0.0, 1.0) * day;
+    col += sky1 * 0.16 * band;
+    col = mix(col, sky1 * 0.92, heat * band * 0.55);
+
+    float grain = vnoise(vec2(uv.x * 180.0, uv.y * 90.0));
+    col *= 0.94 + 0.12 * grain;
+
+    // A snowy steppe is a real place, so lying snow still whitens the ground.
+    if (wx2.w > 0.0)
+      col = mix(col, vec3(0.86, 0.89, 0.95) * (0.14 + 0.86 * lit), wx2.w * 0.85);
   } else {
     col = upperScene(uv, t, fieldParams(screenFld, aspect));
   }
@@ -676,7 +804,7 @@ void main() {
             + rainLayer(wp, t, 2.3, 46.0, 0.28 + lean) * 0.32;
     col += vec3(0.56, 0.66, 0.82) * r * wx.y * 0.80;
     // and it dapples the water it lands on
-    if (uv.y >= WATERLINE) {
+    if (uv.y >= WATERLINE && geo.y > 0.35) {
       float dp = vnoise(vec2(uv.x * 110.0, uv.y * 260.0 + t * 7.0));
       col += vec3(0.09, 0.12, 0.15) * smoothstep(0.60, 0.96, dp) * wx.y;
     }
