@@ -139,8 +139,16 @@ a threshold there is one tap and no cost.
 
 ### Choosing a location
 
-By default the location comes from an IP lookup, the same chain Omarchy's weather
-widget uses. To point it somewhere else — which is the easiest way to see the
+By default the location comes from an IP lookup. **geojs** is asked first and
+wttr.in — the chain Omarchy's own weather widget uses — is the fallback, so
+nothing new has to be reachable. The order matters through a VPN: on a Packethub
+exit whose RIPE record reads `descr: Packethub Egypt, country: EG`, geojs
+answered Cairo while wttr.in answered Vila Prota, **Brazil**. IP geolocation is
+guesswork at the best of times — ipinfo.io and ipwho.is both put that same
+address in *France* — so treat it as a good default rather than an authority,
+and set a location explicitly when it matters.
+
+To point it somewhere else — which is the easiest way to see the
 interface in another climate — add either a place name or explicit coordinates to
 this plugin's entry in `~/.config/omarchy/shell.json`:
 
@@ -311,7 +319,7 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 
 | Gesture | Result |
 |---|---|
-| Double tap, one finger | back to today |
+| Double tap, one finger | roll back to today |
 | Triple tap, one finger | leave |
 | Quick tap, two fingers (no movement) | next palette |
 | Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
@@ -321,6 +329,16 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
+
+**Rolling home is paced by the distance**, roughly 800 ms per day travelled,
+held between 0.9 s and 4.2 s — so you watch the days wind back rather than
+having them flick past. It used to be a flat 1300 ms, which was right only while
+the return snapped to the *nearest equivalent of now* and so never travelled
+more than half a day; going to the true present made the same 1300 ms cover up
+to three weeks, and three sunrises inside a second read as no animation at all.
+The idle drift is gated on the return as well as on the scrub, because a drift
+tick assigns `tod` and would otherwise cancel the animation and strand the sky
+part-way home.
 
 The readout stays hidden until a scrub actually begins — resting a finger on the
 glass leaves the sky clean. Once moving, it names the moment: condition and
