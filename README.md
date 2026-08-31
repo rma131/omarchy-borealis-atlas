@@ -148,14 +148,25 @@ guesswork at the best of times — ipinfo.io and ipwho.is both put that same
 address in *France* — so treat it as a good default rather than an authority,
 and set a location explicitly when it matters.
 
-**Or point at it.** Two fingers held still opens a world map over the scene;
-tap anywhere and the sky becomes that place. It is the only input a tablet-mode
+**Or point at it.** A swipe up from the bottom edge brings a world map with your
+finger; tap anywhere and the sky becomes that place. Swipe it back down, tap
+off it, or press any key to put it away. It is the only input a tablet-mode
 screensaver can rely on — no keyboard — and coarse precision is fine, because
 only latitude and longitude are wanted; the name is filled in afterwards by
 reverse geocoding (BigDataCloud, keyless over HTTPS), which even names the ocean
 when you tap one. A chip under the map reads *Following this machine*, or *Back
 to here* once you have chosen somewhere, which clears the choice and lets
 detection resume.
+
+It was first built on *two fingers held still*, which was a mistake worth
+recording. That gesture required both fingers inside 12 px for 300 ms and lifted
+together, gave no feedback whatsoever, and in practice never fired — any tremor
+set `gestureMoved` and cancelled it. An edge swipe has none of those problems:
+it is separated by **place** rather than by timing, so it cannot be confused
+with anything else, and the sheet tracks the finger so you can see it coming and
+change your mind. The gesture is claimed only once the drag is clearly upward —
+claiming it on contact swallowed any scrub that happened to start low on the
+screen, which is worse than not having it.
 
 The map is `world.js`: Natural Earth 110m land, public domain, exterior rings
 only, Douglas-Peucker at 0.55° and quantised to 0.1° — 50 landmasses, 1264
@@ -339,7 +350,7 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 | Gesture | Result |
 |---|---|
 | Double tap, one finger | roll back to today |
-| **Two fingers held still** | the world map, to choose where the sky is |
+| **Swipe up from the bottom edge** | the world map, to choose where the sky is |
 | Triple tap, one finger | leave |
 | Quick tap, two fingers (no movement) | next palette |
 | Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
@@ -349,6 +360,12 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
+
+**A tap is allowed to wander.** `dragPx` is 12 px so scrubbing starts promptly,
+but reusing that to decide *was that a tap* meant a double tap after a drag did
+nothing at all: 12 px is less than a fingertip shifts on contact, so the taps
+never counted and no action fired. Taps now have their own slop (34 px) and
+520 ms between them rather than 380, which the triple tap needed even more.
 
 **Rolling home is paced by the distance**, roughly 800 ms per day travelled,
 held between 0.9 s and 4.2 s — so you watch the days wind back rather than

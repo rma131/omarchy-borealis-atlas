@@ -85,8 +85,18 @@ Item {
 
   // Interaction tuning. HOLD_MS/DRAG_PX are the tap-vs-play threshold; a
   // release inside both is a dismiss, anything beyond either is interaction.
-  readonly property int holdMs: 300
+  readonly property int holdMs: 340
   readonly property real dragPx: 12
+  // A tap is allowed to wander. dragPx is small so scrubbing starts promptly,
+  // but reusing it to decide "was that a tap" meant a double tap after a drag
+  // simply did nothing: 12 px is less than a fingertip shifts on contact, so
+  // the taps never counted and no action fired at all.
+  readonly property real tapSlopPx: 34
+  // 380 ms between taps was too tight to hit reliably, particularly for the
+  // triple tap that leaves.
+  readonly property int multiTapMs: 520
+  // The bottom edge belongs to the map: a swipe starting here is never a scrub.
+  readonly property real edgeFrac: 0.92
   // Days covered by dragging the full width of the screen. The window is now 23
   // days wide, so at 1.0 crossing it took 23 swipes; 2.5 still leaves about two
   // minutes of forecast per pixel, which is far finer than the hourly data.
@@ -152,6 +162,15 @@ Item {
   property bool todReturning: false
   property bool scrubbing: false
   property bool mapOpen: false
+  // 0 hidden, 1 fully up. Driven straight from the finger during an edge swipe
+  // and eased only when settling, so the sheet tracks rather than lags.
+  property real mapReveal: 0
+  property bool mapDragging: false
+  onMapOpenChanged: if (!mapDragging) mapReveal = mapOpen ? 1 : 0
+  Behavior on mapReveal {
+    enabled: !root.mapDragging
+    NumberAnimation { duration: 280; easing.type: Easing.OutCubic }
+  }
   property int  inspectMode: 0        // 0 off, 1 aurora, 2 moon (event only)
   property real inspectReveal: 0
   Behavior on inspectReveal { NumberAnimation { duration: 420; easing.type: Easing.OutCubic } }
@@ -1224,6 +1243,9 @@ Item {
       property real gestureStartX: 0
       property real gestureStartY: 0
       property bool gestureMoved: false
+      property real gestureMaxDist: 0
+      // an upward swipe that began at the bottom edge is pulling the map up
+      property bool edgeSwipe: false
       // how many fingers were down at once during this gesture, and how many
       // still are — the decision is taken when the last one lifts
       property int activeCount: 0
@@ -1257,6 +1279,8 @@ Item {
             touchArea.gestureStartX = pt.x
             touchArea.gestureStartY = pt.y
             touchArea.gestureMoved = false
+            touchArea.gestureMaxDist = 0
+            touchArea.edgeSwipe = pt.y > height * root.edgeFrac && !root.mapOpen
             touchArea.todStartX = pt.x
             touchArea.todBase = scene.tod
           }
@@ -1271,6 +1295,26 @@ Item {
           if (pt.pointId === touchArea.gestureId) {
             var dx = pt.x - touchArea.gestureStartX
             var dy = pt.y - touchArea.gestureStartY
+            touchArea.gestureMaxDist = Math.max(touchArea.gestureMaxDist,
+                                                Math.sqrt(dx * dx + dy * dy))
+            // Pulling up from the bottom edge brings the map with the finger,
+            // which is the whole point: you can see it coming and change your
+            // mind. The old gesture — two fingers held perfectly still — gave
+            // no feedback at all, and any tremor cancelled it.
+            if (touchArea.edgeSwipe) {
+              // Claim the gesture only once it is clearly upward. Claiming it
+              // on contact swallowed every scrub that happened to start low on
+              // the screen — the finger moved sideways and nothing at all
+              // happened, which is the worst of the possible outcomes.
+              if (root.mapReveal > 0
+                  || (dy < -root.dragPx && Math.abs(dy) > Math.abs(dx))) {
+                root.mapDragging = true
+                root.mapReveal = Math.max(0, Math.min(1, -dy / (height * 0.42)))
+                continue
+              }
+              if (Math.abs(dx) > root.dragPx) touchArea.edgeSwipe = false
+              else continue
+            }
             if (Math.sqrt(dx * dx + dy * dy) > root.dragPx) {
               // the readout appears only once this is a real scrub, not on a
               // bare touch — a resting finger should leave the sky alone
@@ -1302,10 +1346,20 @@ Item {
         if (touchArea.activeCount > 0) return   // still mid-gesture
 
         var held = Date.now() - touchArea.gestureStartMs
-        var quick = !touchArea.gestureMoved && held < root.holdMs
+        var quick = touchArea.gestureMaxDist < root.tapSlopPx && held < root.holdMs
         var fingers = touchArea.gestureMaxPoints
+        var wasEdge = touchArea.edgeSwipe
         touchArea.gestureId = -1
         touchArea.gestureMaxPoints = 0
+        touchArea.edgeSwipe = false
+
+        if (wasEdge && root.mapDragging) {
+          // past a third of the way up it wants to be open
+          root.mapDragging = false
+          root.mapOpen = root.mapReveal > 0.34
+          root.mapReveal = root.mapOpen ? 1 : 0
+          return
+        }
 
         // Letting go keeps the hour you landed on, so a forecast can actually
         // be read. Double tap comes home; see goToNow().
@@ -1319,7 +1373,6 @@ Item {
         // inspect, which needs the first finger to be dragging already.
         if (quick && fingers >= 2) root.cyclePalette()
         else if (quick) { root.tapCount++; tapTimer.restart() }
-        else if (!touchArea.gestureMoved && fingers >= 2) root.mapOpen = true
       }
 
       onCanceled: function(points) {
@@ -1335,7 +1388,7 @@ Item {
 
     Timer {
       id: tapTimer
-      interval: 380; repeat: false
+      interval: root.multiTapMs; repeat: false
       onTriggered: {
         if (root.tapCount >= 3) root.dismiss()
         else if (root.tapCount === 2) root.goToNow()
@@ -1481,23 +1534,88 @@ Item {
       id: mapLayer
       anchors.fill: parent
       z: 50
-      visible: opacity > 0.01
-      opacity: root.mapOpen ? 1.0 : 0.0
-      enabled: root.mapOpen
-      Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+      visible: root.mapReveal > 0.002
+      // only the settled sheet takes taps; a half-pulled one would swallow the
+      // finger that is still pulling it
+      enabled: root.mapOpen && !root.mapDragging
 
-      // tapping off the map puts it away without changing anything
+      // the scrim comes in with the sheet rather than all at once
+      Rectangle {
+        anchors.fill: parent
+        color: "#070b14"
+        opacity: 0.82 * root.mapReveal
+      }
+      // tapping off the sheet puts it away without changing anything
       MouseArea {
         anchors.fill: parent
         onClicked: root.mapOpen = false
       }
-      Rectangle { anchors.fill: parent; color: "#d1070b14" }
+
+      Item {
+        id: mapSheet
+        width: parent.width
+        height: sheetCol.height + root.sceneH * 0.06
+        // rises from below: fully off-screen at 0, resting at 1
+        y: parent.height - height * root.mapReveal
+
+        Rectangle {
+          anchors.fill: parent
+          color: "#0a1220"
+          border.color: "#1e3550"
+          border.width: 1
+          radius: root.sceneH * 0.02
+        }
+
+        // the handle says which way this came from and which way it goes back
+        Rectangle {
+          id: grabBar
+          anchors.horizontalCenter: parent.horizontalCenter
+          y: root.sceneH * 0.014
+          width: root.sceneH * 0.075; height: 4; radius: 2
+          color: "#4e8f7a"; opacity: 0.55
+        }
+        MouseArea {
+          anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+          height: root.sceneH * 0.055
+          drag.axis: Drag.YAxis
+          onClicked: root.mapOpen = false
+          property real pressY: 0
+          onPressed: function (m) { pressY = m.y }
+          onPositionChanged: function (m) {
+            if (!pressed) return
+            var d = m.y - pressY
+            if (d > 0) { root.mapDragging = true
+                         root.mapReveal = Math.max(0, 1 - d / (root.sceneH * 0.30)) }
+          }
+          onReleased: {
+            if (!root.mapDragging) return
+            root.mapDragging = false
+            root.mapOpen = root.mapReveal > 0.6
+            root.mapReveal = root.mapOpen ? 1 : 0
+          }
+        }
+
+      Column {
+        id: sheetCol
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: root.sceneH * 0.040
+        spacing: root.sceneH * 0.022
+
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        color: "#eaf0f8"; opacity: 0.72
+        font.pixelSize: Math.max(12, root.sceneH * 0.019)
+        font.letterSpacing: 0.4
+        text: "Tap anywhere for that sky"
+      }
 
       Item {
         id: mapBox
-        anchors.centerIn: parent
-        // equirectangular is 2:1; fit it whichever way binds first
-        width: Math.min(parent.width * 0.84, parent.height * 0.66 * 2.0)
+        anchors.horizontalCenter: parent.horizontalCenter
+        // equirectangular is 2:1. Sized from the window, not from the column —
+        // the column takes its own size from this, so asking the parent would
+        // be circular.
+        width: Math.min(mapLayer.width * 0.86, mapLayer.height * 0.58 * 2.0)
         height: width / 2.0
 
         Rectangle {
@@ -1576,21 +1694,9 @@ Item {
         }
       }
 
-      Text {
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: mapBox.top
-        anchors.bottomMargin: root.sceneH * 0.030
-        color: "#eaf0f8"; opacity: 0.72
-        font.pixelSize: Math.max(12, root.sceneH * 0.019)
-        font.letterSpacing: 0.4
-        text: "Tap anywhere for that sky"
-      }
-
       // back to being wherever the machine actually is
       Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.top: mapBox.bottom
-        anchors.topMargin: root.sceneH * 0.030
         width: hereLabel.width + root.sceneH * 0.038
         height: hereLabel.height + root.sceneH * 0.020
         radius: height / 2
@@ -1611,6 +1717,9 @@ Item {
           onClicked: { root.unpickPlace(); root.mapOpen = false }
         }
       }
+
+      }   // sheetCol
+      }   // mapSheet
     }
 
     Item {
