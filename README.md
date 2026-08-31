@@ -148,53 +148,6 @@ guesswork at the best of times — ipinfo.io and ipwho.is both put that same
 address in *France* — so treat it as a good default rather than an authority,
 and set a location explicitly when it matters.
 
-**Or point at it.** A swipe up from the bottom edge brings a world map with your
-finger; tap anywhere and the sky becomes that place. Swipe it back down, tap
-off it, or press any key to put it away. It is the only input a tablet-mode
-screensaver can rely on — no keyboard — and coarse precision is fine, because
-only latitude and longitude are wanted; the name is filled in afterwards by
-reverse geocoding (BigDataCloud, keyless over HTTPS), which even names the ocean
-when you tap one. A chip under the map reads *Following this machine*, or *Back
-to here* once you have chosen somewhere, which clears the choice and lets
-detection resume.
-
-**Everything goes through the one `MultiPointTouchArea`, the map included.**
-`MouseArea` does not see a finger here. The map was first built with them — tap
-to pick, tap off to dismiss, drag the handle down to close — and *none* of it
-fired on the touchscreen, so the sheet opened and trapped you with no way out.
-The scrub proves `MultiPointTouchArea` receives touch, so that is the only input
-path the overlay uses; `mouseEnabled` makes it serve a mouse too, and the map
-layer itself is `enabled: false`, drawing only. Hit-testing is `mapToItem` into
-`mapBox`, `hereChip` and `closeChip` — verified by round-trip, a tap at
-Australia's centre resolving to lat −25.0, lon 135.0.
-
-A cancelled touch was a second, independent way to get stuck: it left
-`mapDragging` true, which disables both the settling `Behavior` and the guard in
-`onMapOpenChanged`, so the sheet froze part-way with nothing able to move it.
-`onCanceled` now clears it. And there is a plain **Close** button, because every
-other way out is a gesture, and a gesture you have not been told about is
-indistinguishable from being stuck.
-
-It was first built on *two fingers held still*, which was a mistake worth
-recording. That gesture required both fingers inside 12 px for 300 ms and lifted
-together, gave no feedback whatsoever, and in practice never fired — any tremor
-set `gestureMoved` and cancelled it. An edge swipe has none of those problems:
-it is separated by **place** rather than by timing, so it cannot be confused
-with anything else, and the sheet tracks the finger so you can see it coming and
-change your mind. The gesture is claimed only once the drag is clearly upward —
-claiming it on contact swallowed any scrub that happened to start low on the
-screen, which is worse than not having it.
-
-The map is `world.js`: Natural Earth 110m land, public domain, exterior rings
-only, Douglas-Peucker at 0.55° and quantised to 0.1° — 50 landmasses, 1264
-points, 16 KB. It is embedded rather than fetched so the picker works offline
-and needs no asset, and it is drawn on a `Canvas` only while it is open.
-
-A picked place outranks both `shell.json` and the IP, and survives a restart in
-the same state file as the forecast. The touch area beneath is *disabled* while
-the map is up rather than merely guarded: a `MultiPointTouchArea` can grab a
-touch before the map's `MouseArea` is offered it.
-
 To point it somewhere else — which is the easiest way to see the
 interface in another climate — add either a place name or explicit coordinates to
 this plugin's entry in `~/.config/omarchy/shell.json`:
@@ -367,7 +320,6 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 | Gesture | Result |
 |---|---|
 | Double tap, one finger | roll back to today |
-| **Swipe up from the bottom edge** | the world map, to choose where the sky is |
 | Triple tap, one finger | leave |
 | Quick tap, two fingers (no movement) | next palette |
 | Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
@@ -377,12 +329,6 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
-
-**A tap is allowed to wander.** `dragPx` is 12 px so scrubbing starts promptly,
-but reusing that to decide *was that a tap* meant a double tap after a drag did
-nothing at all: 12 px is less than a fingertip shifts on contact, so the taps
-never counted and no action fired. Taps now have their own slop (34 px) and
-520 ms between them rather than 380, which the triple tap needed even more.
 
 **Rolling home is paced by the distance**, roughly 800 ms per day travelled,
 held between 0.9 s and 4.2 s — so you watch the days wind back rather than
