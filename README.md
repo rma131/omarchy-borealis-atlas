@@ -148,9 +148,29 @@ guesswork at the best of times — ipinfo.io and ipwho.is both put that same
 address in *France* — so treat it as a good default rather than an authority,
 and set a location explicitly when it matters.
 
-To point it somewhere else — which is the easiest way to see the
-interface in another climate — add either a place name or explicit coordinates to
-this plugin's entry in `~/.config/omarchy/shell.json`:
+**Or type it.** Press `/` and the scene dims to a single field: type a place,
+press Enter, and the sky becomes that place. Enter on an empty field goes back
+to following the machine; Esc cancels. Forward geocoding returns the name and
+country along with the coordinates, so a typed place needs no second lookup to
+be labelled, and an unrecognised one says *No such place* rather than quietly
+going somewhere else. A typed place outranks both `shell.json` and the IP, and
+survives a restart in the same state file as the forecast.
+
+`/` was chosen so that **every other key still dismisses**, which is the one
+property a screensaver must not lose: grabbing letters to start typing would
+mean a cat on the keyboard opens a search box instead of getting out of the way.
+
+*Removed:* a tappable world map lived here briefly (`20dca08`…`5ac7f3c`,
+reverted in `5ed1b55`). Two gestures were tried to open it and neither survived
+contact with a hand — two fingers held still could not reliably be performed,
+and the edge swipe raised the sheet but `MouseArea` never sees a finger on this
+overlay, so nothing on it could be tapped and it would not close. The lesson
+worth keeping: there is exactly one input path that works here, the
+`MultiPointTouchArea`, and a feature needing any other kind of pointer handling
+does not belong on the glass. Typing has no such problem.
+
+To point it somewhere else permanently, add either a place name or explicit
+coordinates to this plugin's entry in `~/.config/omarchy/shell.json`:
 
     { "id": "local.borealis-touch", "location": "Reykjavik" }
     { "id": "local.borealis-touch", "latitude": 64.15, "longitude": -21.94 }
@@ -325,10 +345,20 @@ Precipitation intensity is no longer floored, so drizzle looks like drizzle.
 | Drag left/right | scrub time of day (inverted: you pull the sky, as when scrolling content) |
 | **Second finger while dragging** | inspect: parts the cloud, lifts the aurora, shows Kp |
 | Press, hold or drag | push the light around |
-| Any key | dismiss |
+| `/` | type a place to go to |
+| Any other key | dismiss |
 
 The two-finger gestures cannot collide: the palette tap requires *no* movement,
 the inspect tap requires the first finger to already be dragging.
+
+**A tap has to land in the same place twice.** This is the constraint the
+multi-tap gestures were missing, and its absence produced both failures in turn.
+Judging a tap only by how far it strayed from its own start meant either the
+double tap never fired after a drag — at 12 px, less than a fingertip shifts on
+contact — or, once loosened to 34 px, the return home firing on mispresses. Taps
+now allow 22 px of wander each, but a tap more than 110 px from the previous one
+**starts a new count** rather than continuing it, so playing with the light in
+two places cannot add up to "go home". The window between taps is 430 ms.
 
 **Rolling home is paced by the distance**, roughly 800 ms per day travelled,
 held between 0.9 s and 4.2 s — so you watch the days wind back rather than

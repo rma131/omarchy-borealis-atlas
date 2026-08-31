@@ -86,6 +86,15 @@ Item {
   // release inside both is a dismiss, anything beyond either is interaction.
   readonly property int holdMs: 300
   readonly property real dragPx: 12
+  // A tap may wander a little — 12 px is less than a fingertip shifts on
+  // contact, and judging a tap by it meant a deliberate double tap after a drag
+  // silently did nothing. But loosening that alone made the opposite failure:
+  // the return home firing on mispresses. The missing constraint was never
+  // distance-from-its-own-start, it was whether the two taps landed in the
+  // *same place*. Two taps a hand's width apart are two separate taps.
+  readonly property real tapSlopPx: 22
+  readonly property real tapNearPx: 110
+  readonly property int multiTapMs: 430
   // Days covered by dragging the full width of the screen. The window is now 23
   // days wide, so at 1.0 crossing it took 23 swipes; 2.5 still leaves about two
   // minutes of forecast per pixel, which is far finer than the hourly data.
@@ -201,6 +210,8 @@ Item {
   // nothing on purpose — this is a screensaver you can hold a forecast in, so
   // leaving should be deliberate. Any key still exits immediately.
   property int tapCount: 0
+  property real lastTapX: -9999
+  property real lastTapY: -9999
 
   property real todReturnMs: 1300
   readonly property int readoutHoldMs: 1100
@@ -308,6 +319,40 @@ Item {
     }
     return null
   }
+  // A place typed in by hand. It outranks shell.json and the IP alike, because
+  // it is the only one of the three that was actually asked for.
+  property var chosenLoc: null
+  // Anything that pins the location: a late IP reply must overwrite neither.
+  readonly property var lockedLoc: chosenLoc || configLoc
+
+  property bool searching: false
+  property string searchText: ""
+  property string searchNote: ""
+
+  function openSearch() {
+    root.searching = true
+    root.searchText = ""
+    root.searchNote = ""
+  }
+
+  function submitSearch() {
+    var q = root.searchText.trim()
+    if (q.length === 0) {          // empty means "wherever this machine is"
+      root.searching = false
+      if (!root.chosenLoc) return
+      root.chosenLoc = null
+      root.loc = null; root.fc = null; root.kp = null
+      root.ring = null; root.climate = null; root._lastPush = -9999
+      refreshSky(true)
+      return
+    }
+    root.searchNote = "Looking for " + q + "…"
+    root.geoForSearch = true
+    geocode(q)
+  }
+
+  property bool geoForSearch: false
+
   // editing shell.json re-resolves immediately, which is the point of having it
   // The ring and the climate belong to the old place, not the new one. Leaving
   // them behind showed Phoenix with Montreal's aridity for as long as the
@@ -637,6 +682,11 @@ Item {
   function refreshSky(force) {
     if (!force && Date.now() - lastFetchMs < cacheMaxAgeMs) return
     lastFetchMs = Date.now()
+    if (root.chosenLoc) {
+      root.loc = root.chosenLoc
+      fetchForecast(); fetchKp(); fetchElevation(); fetchClimate()
+      return
+    }
     var c = configLoc
     if (c && c.lat !== undefined) {
       root.loc = c; fetchForecast(); fetchKp(); fetchElevation(); fetchClimate(); return
@@ -652,7 +702,7 @@ Item {
   // Throttled so summoning repeatedly does not hammer the lookup, but quick
   // enough that flipping a VPN and reopening shows the new place.
   function checkLocation(force) {
-    if (configLoc) return
+    if (lockedLoc) return
     // A lookup already in flight is left alone, but only for as long as curl's
     // own timeout: a wedged one must not disable detection for the session.
     if ((locProc.running || locFallbackProc.running)
@@ -740,7 +790,8 @@ Item {
   function saveCache() {
     if (!loc) return
     var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
-                    ring: ring, elevation: elevation, climate: climate }
+                    ring: ring, elevation: elevation, climate: climate,
+                    chosen: chosenLoc }
     // base64 through argv: no quoting or escaping can go wrong
     cacheWriteProc.command = ["sh", "-c",
       "mkdir -p \"$(dirname \"$1\")\"; printf %s \"$2\" | base64 -d > \"$1\"",
@@ -758,6 +809,7 @@ Item {
           && String(c.loc.name).toLowerCase() !== want.name.toLowerCase()) {
         refreshSky(true); return
       }
+      if (c.chosen && !root.configLoc) root.chosenLoc = c.chosen
       loc = c.loc; fc = c.fc || null; kp = c.kp || null
       ring = c.ring || null; elevation = c.elevation || 0
       climate = c.climate || null
@@ -869,7 +921,7 @@ Item {
   // An IP lookup started before shell.json was read can land after it; without
   // the configLoc guard it would quietly overwrite an explicit location.
   function adoptIpLocation(lat, lon, name, country) {
-    if (root.configLoc) return
+    if (root.lockedLoc) return
     if (!isFinite(lat) || !isFinite(lon)) return
     var nl = { lat: lat, lon: lon, name: name || "", country: country || "" }
     // a fifth of a degree is roughly 20 km: far enough to be somewhere else
@@ -895,13 +947,13 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          if (root.configLoc) return
+          if (root.lockedLoc) return
           var j = JSON.parse(String(text || ""))
           var lat = parseFloat(j.latitude), lon = parseFloat(j.longitude)
           if (!isFinite(lat) || !isFinite(lon)) throw new Error("no fix")
           root.adoptIpLocation(lat, lon, j.city, j.country)
         } catch (e) {
-          if (!root.configLoc && !locFallbackProc.running) locFallbackProc.running = true
+          if (!root.lockedLoc && !locFallbackProc.running) locFallbackProc.running = true
         }
       }
     }
@@ -914,7 +966,7 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          if (root.configLoc) return
+          if (root.lockedLoc) return
           var a = JSON.parse(String(text || "")).nearest_area[0]
           root.adoptIpLocation(parseFloat(a.latitude), parseFloat(a.longitude),
                                a.areaName && a.areaName[0] && a.areaName[0].value,
@@ -1022,11 +1074,27 @@ Item {
       onStreamFinished: {
         try {
           var r = JSON.parse(String(text || "")).results[0]
-          root.loc = { lat: r.latitude, lon: r.longitude, name: r.name,
-                       country: r.country || "" }
+          var nl = { lat: r.latitude, lon: r.longitude, name: r.name,
+                     country: r.country || "" }
+          // Forward geocoding hands back the name and country with the
+          // coordinates, so a typed place needs no second lookup to be labelled.
+          if (root.geoForSearch) {
+            root.geoForSearch = false
+            root.chosenLoc = nl
+            root.fc = null; root.kp = null
+            root.ring = null; root.climate = null; root._lastPush = -9999
+            root.searching = false; root.searchNote = ""
+          }
+          root.loc = nl
           root.fetchForecast(); root.fetchKp(); root.fetchElevation(); root.fetchClimate()
-        } catch (e) { /* unknown place: fall back to IP */
-          if (!locProc.running) locProc.running = true }
+          root.saveCache()
+        } catch (e) {
+          if (root.geoForSearch) {
+            // say so rather than silently going somewhere else
+            root.geoForSearch = false
+            root.searchNote = "No such place"
+          } else if (!locProc.running) locProc.running = true
+        }
       }
     }
   }
@@ -1151,6 +1219,7 @@ Item {
       property real gestureStartX: 0
       property real gestureStartY: 0
       property bool gestureMoved: false
+      property real gestureMaxDist: 0
       // how many fingers were down at once during this gesture, and how many
       // still are — the decision is taken when the last one lifts
       property int activeCount: 0
@@ -1183,6 +1252,7 @@ Item {
             touchArea.gestureStartX = pt.x
             touchArea.gestureStartY = pt.y
             touchArea.gestureMoved = false
+            touchArea.gestureMaxDist = 0
             touchArea.todStartX = pt.x
             touchArea.todBase = scene.tod
           }
@@ -1196,6 +1266,8 @@ Item {
           if (pt.pointId === touchArea.gestureId) {
             var dx = pt.x - touchArea.gestureStartX
             var dy = pt.y - touchArea.gestureStartY
+            touchArea.gestureMaxDist = Math.max(touchArea.gestureMaxDist,
+                                                Math.sqrt(dx * dx + dy * dy))
             if (Math.sqrt(dx * dx + dy * dy) > root.dragPx) {
               // the readout appears only once this is a real scrub, not on a
               // bare touch — a resting finger should leave the sky alone
@@ -1226,8 +1298,10 @@ Item {
         if (touchArea.activeCount > 0) return   // still mid-gesture
 
         var held = Date.now() - touchArea.gestureStartMs
-        var quick = !touchArea.gestureMoved && held < root.holdMs
+        var quick = touchArea.gestureMaxDist < root.tapSlopPx && held < root.holdMs
         var fingers = touchArea.gestureMaxPoints
+        var relX = points.length > 0 ? points[0].x : touchArea.gestureStartX
+        var relY = points.length > 0 ? points[0].y : touchArea.gestureStartY
         touchArea.gestureId = -1
         touchArea.gestureMaxPoints = 0
 
@@ -1239,7 +1313,17 @@ Item {
         // one quick tap is the way out; two fingers recolours the sky; holding
         // or dragging means "I am playing" and does neither
         if (quick && fingers >= 2) root.cyclePalette()
-        else if (quick) { root.tapCount++; tapTimer.restart() }
+        else if (quick) {
+          // A tap far from the last one starts a new count rather than
+          // continuing it, so playing with the light in two places cannot add
+          // up to "go home".
+          var ddx = relX - root.lastTapX, ddy = relY - root.lastTapY
+          if (root.tapCount > 0 && Math.sqrt(ddx * ddx + ddy * ddy) > root.tapNearPx)
+            root.tapCount = 0
+          root.lastTapX = relX; root.lastTapY = relY
+          root.tapCount++
+          tapTimer.restart()
+        }
       }
 
       onCanceled: function(points) {
@@ -1255,7 +1339,7 @@ Item {
 
     Timer {
       id: tapTimer
-      interval: 380; repeat: false
+      interval: root.multiTapMs; repeat: false
       onTriggered: {
         if (root.tapCount >= 3) root.dismiss()
         else if (root.tapCount === 2) root.goToNow()
@@ -1392,6 +1476,72 @@ Item {
       }
     }
 
+    // Typing a place. IP geolocation is guesswork through a VPN — on one
+    // address this session four services disagreed across three continents —
+    // and this machine has a keyboard, so the shortest honest answer is to be
+    // told where you are.
+    Item {
+      id: searchLayer
+      anchors.fill: parent
+      z: 40
+      visible: opacity > 0.01
+      opacity: root.searching ? 1 : 0
+      enabled: false                       // keys only; it takes no pointer
+      Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+
+      Rectangle { anchors.fill: parent; color: "#070b14"; opacity: 0.55 }
+
+      Column {
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: parent.height * 0.30
+        spacing: root.sceneH * 0.018
+
+        Text {
+          anchors.horizontalCenter: parent.horizontalCenter
+          color: "#eaf0f8"; opacity: 0.55
+          font.pixelSize: Math.max(11, root.sceneH * 0.0165)
+          font.letterSpacing: 0.4
+          text: "Go to"
+        }
+
+        Rectangle {
+          anchors.horizontalCenter: parent.horizontalCenter
+          width: Math.max(root.sceneH * 0.42, entry.width + root.sceneH * 0.06)
+          height: entry.height + root.sceneH * 0.030
+          radius: root.sceneH * 0.008
+          color: "#0d1a2e"
+          border.color: "#2a4460"; border.width: 1
+
+          Text {
+            id: entry
+            anchors.centerIn: parent
+            color: "#eaf0f8"
+            font.pixelSize: Math.max(16, root.sceneH * 0.030)
+            text: root.searchText + (caret.on ? "\u2502" : " ")
+          }
+          Item {
+            id: caret
+            property bool on: true
+            Timer { interval: 520; repeat: true; running: root.searching
+                    onTriggered: caret.on = !caret.on }
+          }
+        }
+
+        Text {
+          anchors.horizontalCenter: parent.horizontalCenter
+          color: root.searchNote === "No such place" ? "#e8a37c" : "#eaf0f8"
+          opacity: 0.62
+          font.pixelSize: Math.max(11, root.sceneH * 0.0155)
+          horizontalAlignment: Text.AlignHCenter
+          text: root.searchNote !== "" ? root.searchNote
+              : (root.chosenLoc
+                 ? "Enter to go  \u00b7  empty Enter follows this machine again"
+                   + "  \u00b7  Esc to cancel"
+                 : "Enter to go  \u00b7  Esc to cancel")
+        }
+      }
+    }
+
     Item {
       id: keyCatcher
       anchors.fill: parent
@@ -1399,6 +1549,26 @@ Item {
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
         event.accepted = true
+        if (root.searching) {
+          if (event.key === Qt.Key_Escape) {
+            root.searching = false; root.searchText = ""; root.searchNote = ""
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            root.submitSearch()
+          } else if (event.key === Qt.Key_Backspace) {
+            root.searchText = root.searchText.slice(0, -1)
+            root.searchNote = ""
+          } else if (event.text && event.text.length === 1
+                     && event.text >= " " && root.searchText.length < 40) {
+            root.searchText += event.text
+            root.searchNote = ""
+          }
+          return
+        }
+        // "/" opens the search. Every other key still dismisses, which is the
+        // one property a screensaver must not lose — grabbing letters to start
+        // typing would mean a cat on the keyboard opens a search box instead of
+        // getting out of the way.
+        if (event.key === Qt.Key_Slash) { root.openSearch(); return }
         root.dismiss()
       }
     }
