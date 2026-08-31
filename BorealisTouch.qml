@@ -132,7 +132,12 @@ Item {
   Timer {
     interval: root.driftMs
     repeat: true
-    running: root.opened && !root.scrubbing && root.inspectMode === 0
+    // `!todReturning` matters as much as `!scrubbing`: a drift tick assigns
+    // tod, which cancels the return animation and leaves the sky stranded
+    // wherever it had got to. That showed up the moment the return grew long
+    // enough to outlive the readout timer.
+    running: root.opened && !root.scrubbing && !root.todReturning
+             && root.inspectMode === 0
     onTriggered: {
       if (!scene) return
       root.drifting = true
@@ -197,8 +202,25 @@ Item {
   // leaving should be deliberate. Any key still exits immediately.
   property int tapCount: 0
 
+  property real todReturnMs: 1300
+  readonly property int readoutHoldMs: 1100
+  property int readoutHold: readoutHoldMs
+  // Clears the flag once the sky has actually arrived, so the drift may resume.
+  Timer {
+    id: returnDone
+    interval: root.todReturnMs; repeat: false
+    onTriggered: root.todReturning = false
+  }
   function goToNow() {
     if (!scene) return
+    // Rolling home has to be watchable. This used to snap to the nearest
+    // *equivalent* of now — same clock time, still N days out — so the journey
+    // was never more than half a day and 1300 ms suited it. Going to the real
+    // present made the trip up to twenty times longer at the same duration,
+    // which blurred three sunrises past in a little over a second and read as
+    // no animation at all. Pace it by the distance instead.
+    var dist = Math.abs(scene.tod - clockFraction())
+    root.todReturnMs = Math.max(900, Math.min(4200, 600 + 800 * dist))
     root.todReturning = true
     root.drifting = false
     // the real present, not "this hour, still three days out" — which is what
@@ -207,7 +229,11 @@ Item {
     root.inspectMode = 0
     root.inspectReveal = 0
     root.scrubbing = true
+    // the date rolling back is the point of the animation, so keep it readable
+    // for the whole trip rather than hiding a third of the way through
+    root.readoutHold = root.todReturnMs + 900
     readoutHideTimer.restart()
+    returnDone.restart()
     refreshReadout()
   }
 
@@ -629,7 +655,8 @@ Item {
     if (configLoc) return
     // A lookup already in flight is left alone, but only for as long as curl's
     // own timeout: a wedged one must not disable detection for the session.
-    if (locProc.running && Date.now() - locStartedMs < 20000) return
+    if ((locProc.running || locFallbackProc.running)
+        && Date.now() - locStartedMs < 20000) return
     if (!force && Date.now() - lastLocMs < 8000) return
     lastLocMs = Date.now()
     locStartedMs = Date.now()
@@ -839,30 +866,59 @@ Item {
     else root.open("{}")
   }
 
-  // Location by IP, exactly the chain Omarchy's own weather widget uses.
+  // An IP lookup started before shell.json was read can land after it; without
+  // the configLoc guard it would quietly overwrite an explicit location.
+  function adoptIpLocation(lat, lon, name, country) {
+    if (root.configLoc) return
+    if (!isFinite(lat) || !isFinite(lon)) return
+    var nl = { lat: lat, lon: lon, name: name || "", country: country || "" }
+    // a fifth of a degree is roughly 20 km: far enough to be somewhere else
+    var moved = !root.loc || Math.abs(nl.lat - root.loc.lat) > 0.2
+                          || Math.abs(nl.lon - root.loc.lon) > 0.2
+    root.loc = nl
+    if (moved) { root.fc = null; root.kp = null; root.ring = null
+                 root.climate = null; root._lastPush = -9999 }
+    root.fetchForecast(); root.fetchKp()
+    if (moved || !root.ring) root.fetchElevation()
+    if (moved || !root.climate) root.fetchClimate()
+  }
+
+  // Location by IP. geojs is asked first because it tracks VPN and hosting
+  // ranges, which is exactly the case that matters here: on a Packethub exit
+  // registered in Egypt it answers Cairo, while wttr.in — the chain Omarchy's
+  // own weather widget uses — answered Vila Prota, Brazil for the same address.
+  // wttr.in stays as the fallback, so nothing new has to be reachable.
   Process {
     id: locProc
+    command: ["curl", "-fsS", "--max-time", "8", "https://get.geojs.io/v1/ip/geo.json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          if (root.configLoc) return
+          var j = JSON.parse(String(text || ""))
+          var lat = parseFloat(j.latitude), lon = parseFloat(j.longitude)
+          if (!isFinite(lat) || !isFinite(lon)) throw new Error("no fix")
+          root.adoptIpLocation(lat, lon, j.city, j.country)
+        } catch (e) {
+          if (!root.configLoc && !locFallbackProc.running) locFallbackProc.running = true
+        }
+      }
+    }
+  }
+
+  Process {
+    id: locFallbackProc
     command: ["curl", "-fsS", "--max-time", "8", "https://wttr.in/?format=j1"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
-          // An IP lookup started before shell.json was read can land after it;
-          // without this it would quietly overwrite an explicit location.
           if (root.configLoc) return
           var a = JSON.parse(String(text || "")).nearest_area[0]
-          var nl = { lat: parseFloat(a.latitude), lon: parseFloat(a.longitude),
-                     name: (a.areaName && a.areaName[0] && a.areaName[0].value) || "",
-                     country: (a.country && a.country[0] && a.country[0].value) || "" }
-          // a fifth of a degree is roughly 20 km: far enough to be somewhere else
-          var moved = !root.loc || Math.abs(nl.lat - root.loc.lat) > 0.2
-                                || Math.abs(nl.lon - root.loc.lon) > 0.2
-          root.loc = nl
-          if (moved) { root.fc = null; root.kp = null; root.ring = null
-                       root.climate = null; root._lastPush = -9999 }
-          root.fetchForecast(); root.fetchKp()
-          if (moved || !root.ring) root.fetchElevation()
-          if (moved || !root.climate) root.fetchClimate()
+          root.adoptIpLocation(parseFloat(a.latitude), parseFloat(a.longitude),
+                               a.areaName && a.areaName[0] && a.areaName[0].value,
+                               a.country && a.country[0] && a.country[0].value)
         } catch (e) { /* offline: the scene simply stays as it is */ }
       }
     }
@@ -1034,7 +1090,8 @@ Item {
       property real tod: 0
       Behavior on tod {
         NumberAnimation {
-          duration: root.todReturning ? 1300 : (root.drifting ? root.driftMs : 110)
+          duration: root.todReturning ? root.todReturnMs
+                  : (root.drifting ? root.driftMs : 110)
           easing.type: root.todReturning ? Easing.InOutSine
                      : root.drifting ? Easing.Linear : Easing.OutCubic
         }
@@ -1176,6 +1233,7 @@ Item {
 
         // Letting go keeps the hour you landed on, so a forecast can actually
         // be read. Double tap comes home; see goToNow().
+        root.readoutHold = root.readoutHoldMs
         readoutHideTimer.restart()
 
         // one quick tap is the way out; two fingers recolours the sky; holding
@@ -1207,7 +1265,7 @@ Item {
 
     Timer {
       id: readoutHideTimer
-      interval: 1100; repeat: false
+      interval: root.readoutHold; repeat: false
       onTriggered: root.scrubbing = false
     }
 
