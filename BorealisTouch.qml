@@ -14,6 +14,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
+import "world.js" as World
 
 Item {
   id: root
@@ -150,6 +151,7 @@ Item {
   property real sceneH: 1080          // panel height, for readout sizing
   property bool todReturning: false
   property bool scrubbing: false
+  property bool mapOpen: false
   property int  inspectMode: 0        // 0 off, 1 aurora, 2 moon (event only)
   property real inspectReveal: 0
   Behavior on inspectReveal { NumberAnimation { duration: 420; easing.type: Easing.OutCubic } }
@@ -308,6 +310,33 @@ Item {
     }
     return null
   }
+  // A place chosen on the map. It outranks shell.json and the IP alike, because
+  // it is the only one of the three the user asked for by hand; tapping "here"
+  // clears it and detection resumes.
+  property var pickedLoc: null
+  // Anything that pins the location: a late IP reply must not overwrite either.
+  readonly property var lockedLoc: pickedLoc || configLoc
+
+  function pickPlace(lat, lon) {
+    var nl = { lat: lat, lon: lon, name: "", country: "" }
+    root.pickedLoc = nl
+    root.loc = nl
+    root.fc = null; root.kp = null; root.ring = null; root.climate = null
+    root._lastPush = -9999
+    reverseGeocode(lat, lon)
+    fetchForecast(); fetchKp(); fetchElevation(); fetchClimate()
+    saveCache()
+  }
+
+  function unpickPlace() {
+    if (!root.pickedLoc) return
+    root.pickedLoc = null
+    root.loc = null
+    root.fc = null; root.kp = null; root.ring = null; root.climate = null
+    root._lastPush = -9999
+    refreshSky(true)
+  }
+
   // editing shell.json re-resolves immediately, which is the point of having it
   // The ring and the climate belong to the old place, not the new one. Leaving
   // them behind showed Phoenix with Montreal's aridity for as long as the
@@ -637,6 +666,12 @@ Item {
   function refreshSky(force) {
     if (!force && Date.now() - lastFetchMs < cacheMaxAgeMs) return
     lastFetchMs = Date.now()
+    if (root.pickedLoc) {
+      root.loc = root.pickedLoc
+      fetchForecast(); fetchKp(); fetchElevation(); fetchClimate()
+      if (!root.pickedLoc.name) reverseGeocode(root.pickedLoc.lat, root.pickedLoc.lon)
+      return
+    }
     var c = configLoc
     if (c && c.lat !== undefined) {
       root.loc = c; fetchForecast(); fetchKp(); fetchElevation(); fetchClimate(); return
@@ -652,7 +687,7 @@ Item {
   // Throttled so summoning repeatedly does not hammer the lookup, but quick
   // enough that flipping a VPN and reopening shows the new place.
   function checkLocation(force) {
-    if (configLoc) return
+    if (lockedLoc) return
     // A lookup already in flight is left alone, but only for as long as curl's
     // own timeout: a wedged one must not disable detection for the session.
     if ((locProc.running || locFallbackProc.running)
@@ -661,6 +696,17 @@ Item {
     lastLocMs = Date.now()
     locStartedMs = Date.now()
     locProc.running = true
+  }
+
+  // The map hands back coordinates; the label wants a place. BigDataCloud is
+  // keyless over HTTPS and names the nearest locality — and names the ocean
+  // when you tap one, which is the right answer rather than a blank.
+  function reverseGeocode(lat, lon) {
+    if (revProc.running) return
+    revProc.command = ["curl", "-fsS", "--max-time", "8",
+      "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=" + lat
+      + "&longitude=" + lon + "&localityLanguage=en"]
+    revProc.running = true
   }
 
   function geocode(place) {
@@ -740,7 +786,8 @@ Item {
   function saveCache() {
     if (!loc) return
     var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
-                    ring: ring, elevation: elevation, climate: climate }
+                    ring: ring, elevation: elevation, climate: climate,
+                    picked: pickedLoc }
     // base64 through argv: no quoting or escaping can go wrong
     cacheWriteProc.command = ["sh", "-c",
       "mkdir -p \"$(dirname \"$1\")\"; printf %s \"$2\" | base64 -d > \"$1\"",
@@ -758,6 +805,7 @@ Item {
           && String(c.loc.name).toLowerCase() !== want.name.toLowerCase()) {
         refreshSky(true); return
       }
+      if (c.picked && !root.configLoc) root.pickedLoc = c.picked
       loc = c.loc; fc = c.fc || null; kp = c.kp || null
       ring = c.ring || null; elevation = c.elevation || 0
       climate = c.climate || null
@@ -853,6 +901,7 @@ Item {
 
   function close() {
     root.opened = false
+    root.mapOpen = false
   }
 
   function dismiss() {
@@ -869,7 +918,7 @@ Item {
   // An IP lookup started before shell.json was read can land after it; without
   // the configLoc guard it would quietly overwrite an explicit location.
   function adoptIpLocation(lat, lon, name, country) {
-    if (root.configLoc) return
+    if (root.lockedLoc) return
     if (!isFinite(lat) || !isFinite(lon)) return
     var nl = { lat: lat, lon: lon, name: name || "", country: country || "" }
     // a fifth of a degree is roughly 20 km: far enough to be somewhere else
@@ -895,13 +944,13 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          if (root.configLoc) return
+          if (root.lockedLoc) return
           var j = JSON.parse(String(text || ""))
           var lat = parseFloat(j.latitude), lon = parseFloat(j.longitude)
           if (!isFinite(lat) || !isFinite(lon)) throw new Error("no fix")
           root.adoptIpLocation(lat, lon, j.city, j.country)
         } catch (e) {
-          if (!root.configLoc && !locFallbackProc.running) locFallbackProc.running = true
+          if (!root.lockedLoc && !locFallbackProc.running) locFallbackProc.running = true
         }
       }
     }
@@ -914,7 +963,7 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          if (root.configLoc) return
+          if (root.lockedLoc) return
           var a = JSON.parse(String(text || "")).nearest_area[0]
           root.adoptIpLocation(parseFloat(a.latitude), parseFloat(a.longitude),
                                a.areaName && a.areaName[0] && a.areaName[0].value,
@@ -966,6 +1015,26 @@ Item {
           root.kp = { hrs: hrs, vals: vals }
           root.pushSky(); root.saveCache()
         } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: revProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var j = JSON.parse(String(text || ""))
+          if (!root.pickedLoc) return
+          var nm = j.city || j.locality || j.principalSubdivision || ""
+          var cy = j.countryName || ""
+          var nl = { lat: root.pickedLoc.lat, lon: root.pickedLoc.lon,
+                     name: nm, country: cy }
+          root.pickedLoc = nl
+          root.loc = nl
+          root.saveCache()
+        } catch (e) { /* no name: the coordinates still drive the sky */ }
       }
     }
   }
@@ -1144,6 +1213,10 @@ Item {
       anchors.fill: parent
       maximumTouchPoints: 3
       mouseEnabled: true
+      // Not merely guarded — disabled. The early returns below stop it acting
+      // on a touch, but a MultiPointTouchArea can *grab* one before the map's
+      // MouseArea is ever offered it, and then the map would take no taps.
+      enabled: !root.mapOpen
 
       // press bookkeeping for the tap-vs-hold decision, first point only
       property int gestureId: -1
@@ -1165,6 +1238,7 @@ Item {
       }
 
       onPressed: function(points) {
+        if (root.mapOpen) return
         // A second finger arriving while the first is already dragging is the
         // inspect tap. The palette gesture cannot collide with it: that one
         // requires a quick two-finger tap with no movement at all.
@@ -1190,6 +1264,7 @@ Item {
       }
 
       onUpdated: function(points) {
+        if (root.mapOpen) return
         for (var i = 0; i < points.length; i++) {
           var pt = points[i]
           root.touchMove(pt.pointId, norm(pt, 0), norm(pt, 1))
@@ -1220,6 +1295,7 @@ Item {
       }
 
       onReleased: function(points) {
+        if (root.mapOpen) return
         for (var i = 0; i < points.length; i++)
           root.touchUp(points[i].pointId, norm(points[i], 0), norm(points[i], 1))
         touchArea.activeCount = Math.max(0, touchArea.activeCount - points.length)
@@ -1237,9 +1313,13 @@ Item {
         readoutHideTimer.restart()
 
         // one quick tap is the way out; two fingers recolours the sky; holding
-        // or dragging means "I am playing" and does neither
+        // or dragging means "I am playing" and does neither.
+        // Two fingers held still opens the map — it cannot collide with the
+        // palette, which needs the same two fingers to be quick, nor with
+        // inspect, which needs the first finger to be dragging already.
         if (quick && fingers >= 2) root.cyclePalette()
         else if (quick) { root.tapCount++; tapTimer.restart() }
+        else if (!touchArea.gestureMoved && fingers >= 2) root.mapOpen = true
       }
 
       onCanceled: function(points) {
@@ -1392,6 +1472,147 @@ Item {
       }
     }
 
+    // ---- the world, for choosing where the sky is ------------------------
+    // IP geolocation is guesswork through a VPN — three services put this
+    // machine in Brazil, France and Egypt on the same address — so there has to
+    // be a way to say where you are. A map answers it with a finger and no
+    // keyboard, which is the only input a tablet-mode screensaver can count on.
+    Item {
+      id: mapLayer
+      anchors.fill: parent
+      z: 50
+      visible: opacity > 0.01
+      opacity: root.mapOpen ? 1.0 : 0.0
+      enabled: root.mapOpen
+      Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+
+      // tapping off the map puts it away without changing anything
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.mapOpen = false
+      }
+      Rectangle { anchors.fill: parent; color: "#d1070b14" }
+
+      Item {
+        id: mapBox
+        anchors.centerIn: parent
+        // equirectangular is 2:1; fit it whichever way binds first
+        width: Math.min(parent.width * 0.84, parent.height * 0.66 * 2.0)
+        height: width / 2.0
+
+        Rectangle {
+          anchors.fill: parent
+          anchors.margins: -1
+          color: "#0d1a2e"
+          border.color: "#2a4460"
+          border.width: 1
+          radius: 3
+        }
+
+        Canvas {
+          id: mapCanvas
+          anchors.fill: parent
+          renderStrategy: Canvas.Cooperative
+          onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            ctx.lineJoin = "round"
+            var R = World.rings
+            for (var i = 0; i < R.length; i++) {
+              var r = R[i]
+              ctx.beginPath()
+              for (var j = 0; j < r.length; j++) {
+                var x = (r[j][0] + 180.0) / 360.0 * width
+                var y = (90.0 - r[j][1]) / 180.0 * height
+                if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+              }
+              ctx.closePath()
+              ctx.fillStyle = "#20423c"
+              ctx.fill()
+              ctx.strokeStyle = "#4e8f7a"
+              ctx.lineWidth = 1.0
+              ctx.stroke()
+            }
+            // the equator and the two tropics, faint, for a sense of latitude
+            ctx.strokeStyle = "#1e3550"
+            ctx.lineWidth = 1.0
+            var bands = [0.0, 23.44, -23.44, 66.56, -66.56]
+            for (var b = 0; b < bands.length; b++) {
+              var yy = (90.0 - bands[b]) / 180.0 * height
+              ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(width, yy); ctx.stroke()
+            }
+          }
+        }
+
+        // where the sky is right now
+        Rectangle {
+          id: marker
+          visible: !!root.loc
+          width: 9; height: 9; radius: 4.5
+          color: "#ffd8a0"
+          border.color: "#40241a"; border.width: 1
+          x: root.loc ? (root.loc.lon + 180.0) / 360.0 * mapBox.width - width / 2 : 0
+          y: root.loc ? (90.0 - root.loc.lat) / 180.0 * mapBox.height - height / 2 : 0
+          Rectangle {
+            anchors.centerIn: parent
+            width: parent.width * 2.6; height: width; radius: width / 2
+            color: "transparent"
+            border.color: "#88ffd8a0"; border.width: 1
+            SequentialAnimation on opacity {
+              running: mapLayer.visible; loops: Animation.Infinite
+              NumberAnimation { from: 0.9; to: 0.15; duration: 1400; easing.type: Easing.InOutSine }
+              NumberAnimation { from: 0.15; to: 0.9; duration: 1400; easing.type: Easing.InOutSine }
+            }
+          }
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          onClicked: function (mouse) {
+            root.pickPlace(90.0 - mouse.y / height * 180.0,
+                           mouse.x / width * 360.0 - 180.0)
+            root.mapOpen = false
+          }
+        }
+      }
+
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: mapBox.top
+        anchors.bottomMargin: root.sceneH * 0.030
+        color: "#eaf0f8"; opacity: 0.72
+        font.pixelSize: Math.max(12, root.sceneH * 0.019)
+        font.letterSpacing: 0.4
+        text: "Tap anywhere for that sky"
+      }
+
+      // back to being wherever the machine actually is
+      Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: mapBox.bottom
+        anchors.topMargin: root.sceneH * 0.030
+        width: hereLabel.width + root.sceneH * 0.038
+        height: hereLabel.height + root.sceneH * 0.020
+        radius: height / 2
+        color: root.pickedLoc ? "#1e3550" : "#14202f"
+        border.color: root.pickedLoc ? "#4e8f7a" : "#243448"
+        border.width: 1
+        Text {
+          id: hereLabel
+          anchors.centerIn: parent
+          color: "#eaf0f8"
+          opacity: root.pickedLoc ? 0.92 : 0.45
+          font.pixelSize: Math.max(11, root.sceneH * 0.0165)
+          text: root.pickedLoc ? "Back to here" : "Following this machine"
+        }
+        MouseArea {
+          anchors.fill: parent
+          enabled: !!root.pickedLoc
+          onClicked: { root.unpickPlace(); root.mapOpen = false }
+        }
+      }
+    }
+
     Item {
       id: keyCatcher
       anchors.fill: parent
@@ -1399,7 +1620,9 @@ Item {
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
         event.accepted = true
-        root.dismiss()
+        // a key backs out of the map first, rather than out of the overlay
+        if (root.mapOpen) root.mapOpen = false
+        else root.dismiss()
       }
     }
   }
