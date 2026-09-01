@@ -63,20 +63,37 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Rebuild from source and compare byte for byte
+      - name: Rebuild from source and compare digests
         run: |
           set -eu
           /usr/lib/qt6/bin/qsb --glsl "100es,120,150" --hlsl 50 --msl 12 \
             -o /tmp/rebuilt.qsb shaders/aurora.frag
-          echo "source   $(sha256sum shaders/aurora.frag     | cut -d' ' -f1)"
-          echo "shipped  $(sha256sum shaders/aurora.frag.qsb | cut -d' ' -f1)"
-          echo "rebuilt  $(sha256sum /tmp/rebuilt.qsb        | cut -d' ' -f1)"
-          if ! cmp -s /tmp/rebuilt.qsb shaders/aurora.frag.qsb; then
+          src=$(sha256sum shaders/aurora.frag     | cut -d' ' -f1)
+          shipped=$(sha256sum shaders/aurora.frag.qsb | cut -d' ' -f1)
+          rebuilt=$(sha256sum /tmp/rebuilt.qsb        | cut -d' ' -f1)
+          echo "source   $src"
+          echo "shipped  $shipped"
+          echo "rebuilt  $rebuilt"
+          # Compared as digests rather than with cmp(1): archlinux:base has no
+          # diffutils, and a missing cmp reports "differs" — a false failure
+          # that says the artifact is wrong when only the tooling is.
+          if [ "$rebuilt" != "$shipped" ]; then
             echo "::error::shaders/aurora.frag.qsb does not match a rebuild of" \
                  "shaders/aurora.frag. Recompile and commit both together."
             exit 1
           fi
           echo "aurora.frag.qsb reproduces exactly from aurora.frag."
+          {
+            echo "### Shader provenance"
+            echo
+            echo "| file | sha256 |"
+            echo "|---|---|"
+            echo "| \`shaders/aurora.frag\` | \`$src\` |"
+            echo "| \`shaders/aurora.frag.qsb\` (shipped) | \`$shipped\` |"
+            echo "| rebuilt here | \`$rebuilt\` |"
+            echo
+            echo "Rebuilt with \`$(pacman -Q qt6-shadertools)\` pinned to Arch snapshot \`$ARCH_SNAPSHOT\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Attest the artifact
         uses: actions/attest-build-provenance@v4
