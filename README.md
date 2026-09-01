@@ -72,6 +72,16 @@ The earlier additive-bloom version was free at idle; this one is not. If you wan
 that back, the lever is the reflection tap count (five taps in `main()`), not the
 touch code.
 
+**Three elevation requests per location change**, not one — the compass rings,
+the near field, and the fan — plus the forecast and the climate archive. All of
+it happens only when the place changes, which is rare, and nothing recurs per
+frame. It is enough to matter during development, though: a day of probing this
+into shape exhausted Open-Meteo's free daily quota and the endpoint started
+answering `429`, so the last round of scene checks was driven from measured
+values injected into the cache rather than live. The requests now carry
+`--retry 2`, because a transient `503` used to leave the chain dead until the
+next refresh.
+
 **The measured skyline was not measurable.** The ridge went from four
 transcendentals per fragment to twelve when it stopped inventing its harmonics
 and started summing the fitted ones. Interleaved back to back in one session,
@@ -214,7 +224,7 @@ biomes, because the world has no hard edges:
 | `lush` | aridity index, temperature | deep saturated canopy, rounder crowns, water toward turquoise |
 | `alpine` | elevation against the local treeline | bare rock on the ground you stand on |
 | `relief` | how tall the horizon looks, in degrees | how high the skyline stands |
-| `water` | elevation ring, aridity index | whether there is a lake at all |
+| `water` | the near field, measured | whether there is water, and what kind |
 
 Two more are altitudes rather than scalars, and become horizontal lines across
 the picture: see **The skyline is the one that is really there** below.
@@ -234,12 +244,14 @@ total does not:
 | Zermatt | 832 mm | 932 mm | **0.89** |
 | Montreal | 1027 mm | 858 mm | **1.20** |
 
-**Where there is no water, a sand sea.** The lake used to be unconditional; the
-Sahara got one. Sea shows up in the ring as points at zero elevation, but lakes
-and rivers sit above sea level, so standing water inland is inferred from the
-climate instead. Dubai is drier than Phoenix and still keeps its water, because
-the ring finds the Gulf; Phoenix is semi-arid with no sea in reach and gets
-dunes.
+**Where there is no water, ground.** The lake used to be unconditional — the
+Sahara got one — and then it was inferred from humidity, which gave Quito one
+for being wet. It is now found: see **Water is the flat thing** below. Where
+there is none, the foreground is the ground you are standing on, and what that
+is made of comes from the climate rather than from a choice: crested dunes
+where it is genuinely arid, smooth pasture where it is not, stone where it is
+cold. The Sahara and the paramo above Quito are the same branch with different
+numbers.
 
 The dunes are crest lines running across the sand, crowding toward the horizon —
 distance along a ground plane goes as 1/depth, and getting that backwards drew
@@ -333,6 +345,71 @@ Not every model carries `freezing_level_height` — Tromso returns 48/48 nulls
 with units `"undefined"` — so where it is missing it is estimated from the
 surface temperature and the standard 6.5 °C/km lapse rate. Checked where both
 exist: Montreal 3153 m against 3291 measured, Quito 5228 against 4925.
+
+### Water is the flat thing
+
+Water was the last part of the scene still being guessed at. Sea shows up in
+the elevation ring as points at zero, but lakes and rivers sit above sea level,
+so inland water was inferred from humidity — which gave Quito a lake for being
+wet, and gave a place with a river beside it exactly the same lake as a place
+with none.
+
+It is now measured, and the signal could not be simpler: **water is flat.**
+Copernicus conditions water surfaces to a single exact value, and real terrain
+essentially never repeats an exact metre, so a repeated elevation is a water
+surface. A hundred points on a 12 km square, 1.3 km apart, is enough to find it.
+
+Flat farmland is the one confound, and two further properties settle it. Water
+is the **lowest** level present — it is where water collects — and it is an
+**isolated spike** rather than the shoulder of a smooth cluster:
+
+| | level | share | isolation | lowest? | |
+|---|---|---|---|---|---|
+| New York | 0 m | 32% | 5.9 | yes | **sea** |
+| Chicago | 174 m | 42% | 48.0 | yes | **lake** |
+| Montreal | 4 m | 6% | 2.5 | yes | **river** |
+| Kansas farmland | 508 m | 7% | 0.7 | no, 71% up | dry |
+| Quito | — | — | — | — | dry |
+
+Kansas repeats 508 m seven times, but 507 and 509 are there too and 508 sits
+most of the way up the local range. Lake Michigan repeats 174 m forty-eight
+times with *nothing* at 173 or 175, at the very bottom. Quito returns 95
+distinct values out of 100 and no repeats at all, which is how "there is no
+water here" gets said.
+
+Sea reads as exactly zero. Past that, how much of the near field the water
+covers says whether it is open or a channel, and the difference reaches the
+shader as one number — how far toward you the water comes:
+
+| | near bank | wave | mirror | what you see |
+|---|---|---|---|---|
+| none | at the waterline | — | — | the water branch never runs |
+| river | 0.90 | 0.55 | 2.2 | a band, with a bank in front of you |
+| lake | 0.965 | 1.00 | 3.2 | nearly the whole foreground, a sliver of shore |
+| sea | 1.00 | 1.50 | 4.2 | all of it, the longest swell |
+
+The mirror figure is how hard the reflection is squashed, which is what says
+how wide the water is: a channel gives back a short section of sky, an ocean a
+long one.
+
+**And the eye stands across it.** This scene has always been composing a view
+across water toward land, so when there is water near the place, the viewpoint
+goes to the far side of it and faces back — the eye at the water's own level,
+which is exactly where the scene puts its horizon. Montreal becomes the
+postcard: the St Lawrence in front, Mount Royal on the skyline behind it.
+
+Mount Royal is the reason this matters. Open-Meteo's geocoder puts "Montreal"
+*on the summit* at 226 m, where nothing rises above you and the profile
+collapsed to a flat plain. It is not that the hill is too small — from across
+the river it is a 182 m peak at 1.4 degrees, alone on an otherwise flat
+horizon, which is exactly what Mount Royal is.
+
+Two things had to be got right for that to work. The distance is the **median**
+of the water samples along the bearing, not the farthest: the near field is a
+square, so its corners are 8.5 km out, and a river running diagonally across
+one pushed the viewpoint to the cap and halved the hill. And the fan's rings
+**scale with how far back you stand** — fixed rings at 6 and 11 km straddled a
+2 km hill 7 km away and missed it completely.
 
 ### Sunrise and sunset, where you actually are
 

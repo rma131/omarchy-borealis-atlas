@@ -64,6 +64,11 @@ layout(std140, binding = 0) uniform buf {
     // ridge's own height, so 1.0 sits on the highest summit and anything above
     // that means the line is off the top of the land and does not apply.
     vec4 alt;     // x snowline, y treeline, z ridge rise in uv, w line softness
+    // What the water in front of you is, if there is any. A river is a band you
+    // stand back from, a lake reaches most of the way in, an ocean fills the
+    // whole foreground — so the one number that carries the difference is how
+    // far toward you it comes. At the waterline exactly, there is none.
+    vec4 shore;   // x near bank in uv, y wave scale, z mirror compression, w spare
 };
 
 // The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every
@@ -700,21 +705,33 @@ void main() {
   vec3 col;
 
   // A lake in the Sahara was the last thing in the scene that ignored where you
-  // are. Wet or dry is a property of the place, not something that animates, so
-  // this is a hard branch and neither path ever costs the other anything.
-  if (uv.y >= WATERLINE && geo.y > 0.35) {
+  // are — and then a lake in Quito, which is drier only in the sense that it
+  // has no lake. Wet or dry is a property of the place, not something that
+  // animates, so this is a hard branch and neither path ever costs the other.
+  // shore.x is where the water stops on its way toward you: the bottom of the
+  // frame for an ocean, a bank part way in for a river, and the waterline
+  // itself where there is no water, which switches this branch off entirely.
+  float bank = max(shore.x, WATERLINE);
+  if (uv.y >= WATERLINE && uv.y < bank) {
     // water: stretched mirror of the upper scene, rippled, gust-blurred,
     // shimmer-broken, darkening with depth
-    float depth = (uv.y - WATERLINE) / (1.0 - WATERLINE);
-    float K = 3.2;
+    float span = max(bank - WATERLINE, 0.001);
+    float depth = (uv.y - WATERLINE) / span;
+    // How hard the mirror is squashed says how wide the water is: a channel
+    // gives back a short section of sky, an ocean a long one.
+    float K = shore.z;
     vec2 ruv = vec2(uv.x, WATERLINE - (uv.y - WATERLINE) * K);
     // A frozen lake has no ripple, no chop, and gives nothing back to a
     // finger pushed across it — which is most of what makes ice read as ice.
     float liquid = 1.0 - ice.x;
-    ruv.x += (0.0015 + 0.004 * depth)
-             * sin(uv.y * 34.0 + t * 1.4)
-             * sin(uv.y * 11.0 - t * 0.9) * liquid;
-    ruv.y += 0.004 * depth * sin(uv.x * 18.0 + uv.y * 26.0 + t * 0.8) * liquid;
+    // Wave scale, from the size of the body: an ocean has a long swell, a
+    // river a fine quick chop. The frequencies divide by it and the amplitudes
+    // multiply, so both ends stay wave-shaped rather than merely bigger.
+    float wv = shore.y;
+    ruv.x += (0.0015 + 0.004 * depth) * wv
+             * sin(uv.y * 34.0 / wv + t * 1.4)
+             * sin(uv.y * 11.0 / wv - t * 0.9) * liquid;
+    ruv.y += 0.004 * depth * wv * sin(uv.x * 18.0 / wv + uv.y * 26.0 + t * 0.8) * liquid;
     // Surface chop where the finger actually meets the water, on screen.
     ruv.x += screenFld.x * 0.30 * liquid;
     ruv.y += screenFld.y * 0.22 * liquid;
@@ -723,7 +740,7 @@ void main() {
     // 5 taps at tight spacing (sparse wide taps ghost thin features);
     // gusts scale the spacing mildly
     float gust = vnoise(vec2(uv.x * 6.0 - t * 0.18, uv.y * 3.0 + t * 0.06));
-    float s = (0.003 + 0.005 * depth) * (0.7 + 0.6 * gust);
+    float s = (0.003 + 0.005 * depth) * (0.7 + 0.6 * gust) * shore.y;
     // The reflection carries the same disturbance: evaluate the field once at
     // the mirrored sky point and let all five taps share it. The taps sit a few
     // thousandths apart — far finer than the field varies — so evaluating it
@@ -749,6 +766,10 @@ void main() {
     shimmer = mix(shimmer, 1.0, ice.x);      // ice does not shimmer
     col = refl * shimmer * (0.62 - 0.34 * depth) + vec3(0.010, 0.018, 0.038);
     col += vec3(0.05, 0.08, 0.10) * smoothstep(0.015, 0.0, uv.y - WATERLINE);
+    // and a matching brightening where it meets the near bank, so a river does
+    // not simply stop against the ground
+    col += vec3(0.04, 0.06, 0.08) * smoothstep(0.012, 0.0, bank - uv.y)
+           * step(bank, 0.995);
 
     // Glitter: whichever light is actually up lays a broken column toward the
     // viewer, widening with depth. The water's own facet noise stands in for
@@ -775,9 +796,14 @@ void main() {
       col = mix(col, iceCol, ice.x);
     }
   } else if (uv.y >= WATERLINE) {
-    // ---- a sand sea, where there is no water to mirror --------------------
-    // near = 0 at the horizon, 1 at the bottom of the screen.
-    float near = (uv.y - WATERLINE) / (1.0 - WATERLINE);
+    // ---- the ground you are standing on, where water does not reach -------
+    // Everything from the near bank down: the whole foreground where there is
+    // no water at all, a strip of bank in front of a river, nothing at all
+    // under an ocean. What it is made of comes from the climate rather than
+    // from a choice — crested dunes where it is genuinely arid, smooth pasture
+    // where it is not, stone where it is cold. The Sahara and the paramo above
+    // Quito are the same code with different numbers.
+    float near = (uv.y - bank) / max(1.0 - bank, 0.001);
     // Crest lines run across the sand and crowd toward the horizon. Distance
     // along a ground plane goes as 1/depth, which is what makes them crowd;
     // pow(near, k) does the exact opposite and drew fine corduroy at the
@@ -790,11 +816,20 @@ void main() {
     float h     = fract(persp * 0.62 + wob * (0.35 + 0.65 * near));
 
     // A dune is not a sine: the windward side climbs slowly over most of the
-    // spacing and the lee face drops away in one steep shadowed step.
-    float face = smoothstep(0.02, 0.68, h) - 0.85 * smoothstep(0.68, 0.88, h);
+    // spacing and the lee face drops away in one steep shadowed step. Wet
+    // ground has no such thing, so aridity flattens the lee face out into a
+    // gentle swell and what is left reads as pasture rolling away.
+    float dune = clamp(land.y * 1.6, 0.0, 1.0);
+    float face = mix(smoothstep(0.10, 0.90, h) - 0.30 * smoothstep(0.90, 1.0, h),
+                     smoothstep(0.02, 0.68, h) - 0.85 * smoothstep(0.68, 0.88, h),
+                     dune);
     // a low sun rakes across them and the relief is everything; overhead it
     // flattens out, which is exactly how a dune field looks at noon
-    float rake = 0.34 + 0.58 * (1.0 - smoothstep(0.05, 0.55, sunAlt));
+    // Dune relief lives or dies by a raking light; pasture keeps a floor under
+    // it, because a field at noon still has form and at 0.30 the near bank drew
+    // as one flat green block.
+    float rake = (0.34 + 0.58 * (1.0 - smoothstep(0.05, 0.55, sunAlt)))
+               * (0.55 + 0.45 * dune);
     // Where the rows compress past a pixel the crest lines alias into a moire
     // of hairlines, so the relief is faded out into the distance instead.
     rake *= smoothstep(0.0, 0.18, near);
@@ -815,6 +850,13 @@ void main() {
     float toward = smoothstep(0.0, 0.45, near);
     vec3 sand  = mix(vec3(0.46, 0.41, 0.30), vec3(0.80, 0.70, 0.51), toward);
     vec3 stony = mix(vec3(0.40, 0.39, 0.36), vec3(0.66, 0.63, 0.57), toward);
+    // Grass, for the ground that is dry only in the sense of having no lake.
+    // Deepened by lush the same way the ridge is, so the foreground and the
+    // slope behind it agree about what grows here.
+    vec3 turf  = mix(vec3(0.22, 0.29, 0.18), vec3(0.38, 0.46, 0.27), toward);
+    turf = mix(turf, mix(vec3(0.16, 0.30, 0.16), vec3(0.28, 0.48, 0.26), toward),
+               land.z);
+    sand = mix(turf, sand, dune);
     sand = mix(sand, stony, land.x);
     vec3 nightSand = mix(vec3(0.055, 0.062, 0.095), vec3(0.028, 0.032, 0.052), near);
     col = mix(nightSand, sand, day) * shade;
@@ -822,7 +864,7 @@ void main() {
     // One tap of the sky, doing two jobs: the light the sand is bathed in, and
     // — where it is hot enough — the mirage, which is nothing but a false
     // reflection. The lake spends five taps here; this spends one.
-    vec2 muv = vec2(uv.x, WATERLINE - (uv.y - WATERLINE) * 3.2);
+    vec2 muv = vec2(uv.x, WATERLINE - (uv.y - bank) * 3.2);
     muv.x += 0.004 * sin(uv.y * 40.0 + t * 2.6);
     muv.x += screenFld.x * 0.22;
     vec3 sky1 = upperScene(clamp(muv, 0.0, 1.0), t, fieldParams(screenFld, aspect));
@@ -831,8 +873,12 @@ void main() {
     col += sky1 * 0.16 * band;
     col = mix(col, sky1 * 0.92, heat * band * 0.55);
 
+    // Two grains: the fine one is sand, the coarse one is the clumping of
+    // grass and scrub, and aridity decides which of them you are looking at.
     float grain = vnoise(vec2(uv.x * 180.0, uv.y * 90.0));
+    float clump = vnoise(vec2(uv.x * 22.0, uv.y * 46.0 + 3.1));
     col *= 0.94 + 0.12 * grain;
+    col *= mix(0.90 + 0.20 * clump, 1.0, dune);
 
     // A snowy steppe is a real place, so lying snow still whitens the ground.
     if (wx2.w > 0.0)
@@ -857,7 +903,7 @@ void main() {
             + rainLayer(wp, t, 2.3, 46.0, 0.28 + lean) * 0.32;
     col += vec3(0.56, 0.66, 0.82) * r * wx.y * 0.80;
     // and it dapples the water it lands on
-    if (uv.y >= WATERLINE && geo.y > 0.35) {
+    if (uv.y >= WATERLINE && uv.y < max(shore.x, WATERLINE)) {
       float dp = vnoise(vec2(uv.x * 110.0, uv.y * 260.0 + t * 7.0));
       col += vec3(0.09, 0.12, 0.15) * smoothstep(0.60, 0.96, dp) * wx.y;
     }

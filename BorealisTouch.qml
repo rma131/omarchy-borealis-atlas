@@ -297,6 +297,7 @@ Item {
   onKpChanged: { _lastPush = -9999; dataRev++; pushSky() }
   onRingChanged: { _lastPush = -9999; pushSky() }
   onHorizonChanged: { _lastPush = -9999; pushSky() }
+  onWaterChanged: { _lastPush = -9999; pushSky() }
   onClimateChanged: { _lastPush = -9999; pushSky() }
   // sky angular speed, for motion blur
   property real todVel: 0
@@ -343,7 +344,7 @@ Item {
       if (!root.chosenLoc) return
       root.chosenLoc = null
       root.loc = null; root.fc = null; root.kp = null
-      root.ring = null; root.climate = null; root.horizon = null
+      root.ring = null; root.climate = null; root.horizon = null; root.water = null
       root._lastPush = -9999
       refreshSky(true)
       return
@@ -361,7 +362,7 @@ Item {
   // archive took to answer — and wrote that pairing into the cache.
   onConfigLocChanged: {
     root.loc = null; root.ring = null; root.climate = null
-    root.horizon = null; root.fc = null; root.kp = null
+    root.horizon = null; root.water = null; root.fc = null; root.kp = null
     refreshSky(true)
   }
 
@@ -373,6 +374,12 @@ Item {
   //   base the altitude the ridge stands on and span the metres from there to
   //   its highest point — which is what turns a freezing level into a snowline }
   property var horizon: null
+  // { level m, kind 0 none / 1 river / 2 lake / 3 sea, frac, az, dist }
+  property var water: null
+
+  // The shader's WATERLINE. Where the land stands and the water begins are the
+  // same line in this scene, so QML has to agree with it to place a near bank.
+  readonly property real waterline: 0.82
 
   // Where trees stop, which is not a fixed altitude: about 3500 m at the
   // equator, falling roughly 40 m per degree of latitude. Quito sits at 2920 m
@@ -425,13 +432,12 @@ Item {
     var relief = horizon ? Math.pow(cl(horizon.maxAng / 20.0), 0.8)
                : ring ? cl((ring.spread - 30.0) / 1200.0) : 0.5
 
-    // Sea shows up in the ring as points at zero. Lakes and rivers do not —
-    // they sit above sea level — so standing water inland is inferred from the
-    // climate instead: a place has to be genuinely humid to keep any. Phoenix
-    // is semi-arid and gets none; Dubai is drier still but sits on the Gulf,
-    // and the ring finds it.
-    var inland = climate ? cl((climate.ai - 0.40) / 0.35) : 1.0
-    var water = ring ? cl(Math.max(ring.sea * 1.6, inland)) : inland
+    // Water used to be inferred from humidity, because sea shows up in the ring
+    // as points at zero elevation and lakes and rivers do not. That gave Quito a
+    // lake for being wet. It is now found rather than guessed — see the near
+    // field pass — and this is simply whether there is any.
+    var water = root.water ? (root.water.kind > 0 ? 1.0 : 0.0)
+              : (ring ? cl(ring.sea * 1.6) : 0.0)
 
     return { cold: cold, arid: arid, lush: lush, alpine: alpine,
              relief: relief, water: water }
@@ -691,6 +697,18 @@ Item {
     // Softness in uv. Wider than a pixel so the line does not crawl, tight
     // enough that it reads as a line and not as a gradient.
     scene.alt = Qt.vector4d(snowF, treeF, rise, 0.006)
+
+    // How far toward you the water comes, which is the one number that carries
+    // the difference between a river, a lake and an ocean. A river is a band
+    // with a bank in front of it; a lake reaches nearly all the way in; an
+    // ocean fills the foreground. At the waterline exactly there is none, and
+    // the shader's water branch never runs.
+    var kind = root.water ? root.water.kind : 0
+    var bank = root.waterline, wave = 1.0, mirror = 3.2
+    if (kind === 1)      { bank = 0.900; wave = 0.55; mirror = 2.2 }  // river
+    else if (kind === 2) { bank = 0.965; wave = 1.00; mirror = 3.2 }  // lake
+    else if (kind === 3) { bank = 1.000; wave = 1.50; mirror = 4.2 }  // sea
+    scene.shore = Qt.vector4d(bank, wave, mirror, 0)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -771,7 +789,7 @@ Item {
 
   function geocode(place) {
     if (geoProc.running) return
-    geoProc.command = ["curl", "-fsS", "--max-time", "8",
+    geoProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8",
       "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name="
       + encodeURIComponent(place)]
     geoProc.running = true
@@ -779,7 +797,7 @@ Item {
 
   function fetchForecast() {
     if (!loc || fcProc.running) return
-    fcProc.command = ["curl", "-fsS", "--max-time", "10",
+    fcProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "10",
       "https://api.open-meteo.com/v1/forecast"
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
       + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
@@ -807,7 +825,7 @@ Item {
       return d.getFullYear() + "-" + (m < 10 ? "0" : "") + m
                              + "-" + (dd < 10 ? "0" : "") + dd
     }
-    climProc.command = ["curl", "-fsS", "--max-time", "12",
+    climProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "12",
       "https://archive-api.open-meteo.com/v1/archive?latitude=" + loc.lat
       + "&longitude=" + loc.lon
       + "&start_date=" + iso(start) + "&end_date=" + iso(end)
@@ -885,27 +903,96 @@ Item {
         la.push(pt[0].toFixed(4)); lo.push(pt[1].toFixed(4))
       }
     }
-    elevProc.command = ["curl", "-fsS", "--max-time", "8", root.elevationUrl(la, lo)]
+    elevProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", root.elevationUrl(la, lo)]
     elevProc.running = true
   }
 
-  property real hzH0: 0        // the observer's own ground, from the DEM
-  property var hzP1: null      // pass 1's elevations, for pass 2 to fold in
+  property real hzH0: 0        // eye height: the ground, or the water you stand on
+  // Every sample the earlier passes took, as metres east and north of the place
+  // and an elevation — [dx, dy, h, dx, dy, h, ...]. Kept because pass 2 samples
+  // only a slice of the compass at its own distances, and 200 more looks at the
+  // same ground cost nothing. Offsets rather than coordinates because the
+  // viewpoint may not be the place: they are re-projected onto wherever it is.
+  property var hzPts: null
   property real hzAim: 0       // the azimuth the view faces
-  function fetchHorizonFan(centreAz) {
+  property real hzTerrainAim: 0   // where the country rises, from pass 1
+  property real hzVx: 0        // the viewpoint, as metres east and north
+  property real hzVy: 0
+  property var hzRingsUsed: null
+
+  // Where the eye stands and which way it looks. Given water, that is the far
+  // side of it looking back — the picture this scene has always been composing
+  // is a view across water toward land, and standing anywhere else fights it.
+  function fetchHorizonFan(vx, vy, centreAz, rings) {
     if (!loc || fanProc.running) return
+    var vd = Math.sqrt(vx * vx + vy * vy)
+    var vlat = loc.lat, vlon = loc.lon
+    if (vd > 1.0) {
+      var pv = root.offsetLL(loc.lat, loc.lon, vd,
+                             Math.atan2(vx, vy) * 180 / Math.PI)
+      vlat = pv[0]; vlon = pv[1]
+    }
     var la = [], lo = []
     for (var j = 0; j < root.hzFanAz; j++) {
       var az = centreAz - root.hzFov * 0.5
              + root.hzFov * j / (root.hzFanAz - 1)
-      for (var r = 0; r < root.hzFan.length; r++) {
-        var pt = root.offsetLL(loc.lat, loc.lon, root.hzFan[r], az)
-        la.push(pt[0].toFixed(4)); lo.push(pt[1].toFixed(4))
+      for (var r = 0; r < rings.length; r++) {
+        var pt = root.offsetLL(vlat, vlon, rings[r], az)
+        la.push(pt[0].toFixed(5)); lo.push(pt[1].toFixed(5))
       }
     }
-    root.hzAim = centreAz
-    fanProc.command = ["curl", "-fsS", "--max-time", "8", root.elevationUrl(la, lo)]
+    root.hzAim = centreAz; root.hzVx = vx; root.hzVy = vy
+    root.hzRingsUsed = rings
+    fanProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", root.elevationUrl(la, lo)]
     fanProc.running = true
+  }
+
+  // ---- pass 3, the near field ------------------------------------------------
+  // A hundred points on a 12 km square, 1.3 km apart. Two jobs: find the water,
+  // and give the viewpoint somewhere to stand.
+  //
+  // Water is found by the one thing that makes it unmistakable in a DEM — it is
+  // flat. Copernicus conditions water surfaces to a single exact value, and real
+  // terrain essentially never repeats an exact metre, so a repeated value is a
+  // water surface. Quito comes back with 95 distinct values out of 100 and no
+  // repeats at all, which is how "there is no water here" gets said.
+  //
+  // Flat farmland is the one confound, and two further properties settle it:
+  // water is the LOWEST level present, and it is an isolated spike rather than
+  // a smooth cluster. Kansas repeats 508 m seven times, but 507 and 509 are
+  // there too and 508 sits at 71% of the local range; Lake Michigan repeats
+  // 174 m forty-eight times with nothing at 173 or 175, at the very bottom.
+  //
+  //   place       level  share  isolation  lowest   -> verdict
+  //   New York      0 m    32%       5.9     yes       sea
+  //   Chicago     174 m    42%      48.0     yes       lake
+  //   Montreal      4 m     6%       2.5     yes       river
+  //   Kansas      508 m     7%       0.7     no        dry
+  //   Quito         -       -         -       -        dry
+  readonly property real nearHalf: 6000.0
+  readonly property int nearN: 10
+
+  function fetchNearField() {
+    if (!loc || nearProc.running) return
+    var la = [], lo = []
+    for (var i = 0; i < root.nearN; i++) {
+      for (var j = 0; j < root.nearN; j++) {
+        var dy = root.nearHalf - 2 * root.nearHalf * i / (root.nearN - 1)
+        var dx = -root.nearHalf + 2 * root.nearHalf * j / (root.nearN - 1)
+        var d = Math.sqrt(dx * dx + dy * dy)
+        var pt = root.offsetLL(loc.lat, loc.lon, d < 1.0 ? 1.0 : d,
+                               Math.atan2(dx, dy) * 180 / Math.PI)
+        la.push(pt[0].toFixed(5)); lo.push(pt[1].toFixed(5))
+      }
+    }
+    nearProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", root.elevationUrl(la, lo)]
+    nearProc.running = true
+  }
+
+  // No water, or no answer: stand where you are and face whatever rises
+  // highest, which is what this did before there was any water in it.
+  function fallbackFan() {
+    root.fetchHorizonFan(0, 0, root.hzTerrainAim, root.hzFan.concat([]))
   }
 
   // Twelve terms of a half-range cosine series. A cosine fit and not a Fourier
@@ -933,7 +1020,7 @@ Item {
     if (!loc) return
     var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
                     ring: ring, elevation: elevation, climate: climate,
-                    horizon: horizon, hzH0: hzH0,
+                    horizon: horizon, hzH0: hzH0, water: water,
                     chosen: chosenLoc }
     // base64 through argv: no quoting or escaping can go wrong
     cacheWriteProc.command = ["sh", "-c",
@@ -957,9 +1044,10 @@ Item {
       ring = c.ring || null; elevation = c.elevation || 0
       climate = c.climate || null
       horizon = c.horizon || null; hzH0 = c.hzH0 || 0
+      water = c.water || null
       lastFetchMs = c.at || 0
       pushSky()
-      if (!ring || !horizon) fetchHorizon()
+      if (!ring || !horizon || !water) fetchHorizon()
       if (!climate) fetchClimate()
       // the cache says where you were, not where you are
       checkLocation(true)
@@ -1073,10 +1161,10 @@ Item {
                           || Math.abs(nl.lon - root.loc.lon) > 0.2
     root.loc = nl
     if (moved) { root.fc = null; root.kp = null; root.ring = null
-                 root.climate = null; root.horizon = null
+                 root.climate = null; root.horizon = null; root.water = null
                  root._lastPush = -9999 }
     root.fetchForecast(); root.fetchKp()
-    if (moved || !root.ring || !root.horizon) root.fetchHorizon()
+    if (moved || !root.ring || !root.horizon || !root.water) root.fetchHorizon()
     if (moved || !root.climate) root.fetchClimate()
   }
 
@@ -1087,7 +1175,7 @@ Item {
   // wttr.in stays as the fallback, so nothing new has to be reachable.
   Process {
     id: locProc
-    command: ["curl", "-fsS", "--max-time", "8", "https://get.geojs.io/v1/ip/geo.json"]
+    command: ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", "https://get.geojs.io/v1/ip/geo.json"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1106,7 +1194,7 @@ Item {
 
   Process {
     id: locFallbackProc
-    command: ["curl", "-fsS", "--max-time", "8", "https://wttr.in/?format=j1"]
+    command: ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", "https://wttr.in/?format=j1"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1122,13 +1210,105 @@ Item {
   }
 
   Process {
+    id: nearProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var e = JSON.parse(String(text || "")).elevation
+          var want = root.nearN * root.nearN
+          if (!e || e.length < want) { root.fallbackFan(); return }
+
+          // Offsets in metres, matching the order fetchNearField built them.
+          var dx = [], dy = [], q, i, j
+          for (i = 0; i < root.nearN; i++) {
+            for (j = 0; j < root.nearN; j++) {
+              dy.push(root.nearHalf - 2 * root.nearHalf * i / (root.nearN - 1))
+              dx.push(-root.nearHalf + 2 * root.nearHalf * j / (root.nearN - 1))
+            }
+          }
+          for (i = 0; i < want; i++) root.hzPts.push(dx[i], dy[i], e[i])
+
+          // How many samples sit at each exact elevation, and what the distinct
+          // levels are in order — flatness, and how low it is, are the whole test.
+          var count = {}, levels = []
+          for (i = 0; i < want; i++) {
+            var v = e[i]
+            if (count[v] === undefined) { count[v] = 0; levels.push(v) }
+            count[v]++
+          }
+          levels.sort(function (a, b) { return a - b })
+          var at = function (v) { return count[v] === undefined ? 0 : count[v] }
+
+          var lvl = null, best = 0
+          for (q = 0; q < levels.length; q++) {
+            var v2 = levels[q], n = at(v2)
+            if (n < 4) continue
+            // an isolated spike, not the shoulder of a smooth cluster
+            var isol = n / (1 + at(v2 - 1) + at(v2 + 1) + at(v2 - 2) + at(v2 + 2))
+            // and the lowest ground around: water is where water collects
+            if (isol >= 1.5 && q <= 1 && n > best) { best = n; lvl = v2 }
+          }
+
+          if (lvl === null) {
+            root.water = { level: 0, kind: 0, frac: 0, az: 0, dist: 0 }
+            root.fallbackFan(); return
+          }
+
+          var frac = best / want
+          // Sea reads as exactly zero; past that it is how much of the near
+          // field the water covers that says whether it is open or a channel.
+          var kind = (lvl <= 1.0) ? 3 : (frac >= 0.12 ? 2 : 1)
+
+          // Which way it lies, and how far out it reaches along that bearing.
+          var sx = 0, sy = 0
+          for (i = 0; i < want; i++)
+            if (e[i] === lvl) { sx += dx[i]; sy += dy[i] }
+          sx /= best; sy /= best
+          var waz = (Math.atan2(sx, sy) * 180 / Math.PI + 360) % 360
+
+          var ds = []
+          for (i = 0; i < want; i++) {
+            if (e[i] !== lvl) continue
+            var a4 = Math.atan2(dx[i], dy[i]) * 180 / Math.PI
+            var rel4 = ((a4 - waz + 540) % 360) - 180
+            if (Math.abs(rel4) <= 25)
+              ds.push(Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]))
+          }
+          ds.sort(function (a, b) { return a - b })
+          // The median and not the farthest: the grid is a square, so its
+          // corners are 8.5 km out and a river running diagonally across one
+          // pushed the viewpoint to the cap and shrank Mount Royal by half.
+          var med = ds.length ? ds[Math.floor(ds.length / 2)] : 3000.0
+
+          root.water = { level: lvl, kind: kind, frac: frac, az: waz, dist: med }
+
+          // Stand across it, facing back. Near enough that the far shore still
+          // reads, far enough that the water is genuinely in front of you.
+          var D = Math.max(2000.0, Math.min(med + 1200.0, 8000.0))
+          var vx = D * Math.sin(waz * Math.PI / 180)
+          var vy = D * Math.cos(waz * Math.PI / 180)
+          // Standing on the water means the eye is at the water's own level,
+          // which is exactly where this scene puts the horizon.
+          root.hzH0 = lvl
+          // Rings scaled to how far back we stand, so whatever we came to look
+          // at is actually sampled. Fixed rings at 6 and 11 km straddled a 2 km
+          // hill 7 km away and missed Mount Royal completely.
+          root.fetchHorizonFan(vx, vy, (waz + 180.0) % 360.0,
+                               [D * 0.30, D * 0.60, D, D * 1.80, D * 3.20])
+        } catch (err) { root.fallbackFan() }
+      }
+    }
+  }
+
+  Process {
     id: fanProc
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           var e = JSON.parse(String(text || "")).elevation
-          var want = root.hzFanAz * root.hzFan.length
+          var want = root.hzFanAz * (root.hzRingsUsed || root.hzFan).length
           if (!e || e.length < want) return
           var h0 = root.hzH0
 
@@ -1150,36 +1330,41 @@ Item {
           // The geocoder puts "Montreal" on top of Mount Royal, where every
           // direction is downhill; floored, all twenty columns came back equal,
           // the profile normalised to zero, and the land vanished entirely.
+          var rings = root.hzRingsUsed || root.hzFan
           var col = [], ang = [], i = 0
           for (var j = 0; j < root.hzFanAz; j++) {
             var bh = -12000, ba = -999
-            for (var r = 0; r < root.hzFan.length; r++) {
+            for (var r = 0; r < rings.length; r++) {
               if (e[i] > bh) bh = e[i]
-              var a = root.apparentDeg(e[i], h0, root.hzFan[r])
+              var a = root.apparentDeg(e[i], h0, rings[r])
               if (a > ba) ba = a
               i++
             }
             col.push(bh); ang.push(ba)
           }
 
-          // Fold in whatever pass 1 saw inside this window, at its own
-          // distances. Purely extra evidence about the same ground.
-          var p1 = root.hzP1
-          if (p1 && p1.length >= 1 + root.hzAz * root.hzRings.length) {
+          // Fold in every sample the earlier passes took, re-projected onto
+          // wherever the eye actually stands. Purely extra evidence about the
+          // same ground, and it is what raised Quito's summit from 4007 m to
+          // 4565 — at 90 m postings a summit is one cell wide, so every extra
+          // look at it counts.
+          var pp = root.hzPts
+          if (pp && pp.length >= 3) {
             var half = root.hzFov * 0.5
             var step = root.hzFov / (root.hzFanAz - 1)
-            var k = 1
-            for (var a2 = 0; a2 < root.hzAz; a2++) {
-              var rel = ((360.0 * a2 / root.hzAz - root.hzAim + 540.0) % 360.0) - 180.0
-              for (var r2 = 0; r2 < root.hzRings.length; r2++) {
-                var hv = p1[k]; k++
-                if (Math.abs(rel) > half) continue
-                var c = Math.round((rel + half) / step)
-                c = Math.max(0, Math.min(root.hzFanAz - 1, c))
-                if (hv > col[c]) col[c] = hv
-                var av = root.apparentDeg(hv, h0, root.hzRings[r2])
-                if (av > ang[c]) ang[c] = av
-              }
+            for (var k = 0; k + 2 < pp.length; k += 3) {
+              var ox = pp[k] - root.hzVx, oy = pp[k + 1] - root.hzVy
+              var od = Math.sqrt(ox * ox + oy * oy)
+              if (od < 400.0) continue          // under your feet, not a skyline
+              var oa = Math.atan2(ox, oy) * 180 / Math.PI
+              var rel = ((oa - root.hzAim + 540.0) % 360.0) - 180.0
+              if (Math.abs(rel) > half) continue
+              var c = Math.round((rel + half) / step)
+              c = Math.max(0, Math.min(root.hzFanAz - 1, c))
+              var hv = pp[k + 2]
+              if (hv > col[c]) col[c] = hv
+              var av = root.apparentDeg(hv, h0, od)
+              if (av > ang[c]) ang[c] = av
             }
           }
 
@@ -1229,7 +1414,7 @@ Item {
 
   Process {
     id: kpProc
-    command: ["curl", "-fsS", "--max-time", "8",
+    command: ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8",
       "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"]
     stdout: StdioCollector {
       waitForEnd: true
@@ -1307,11 +1492,21 @@ Item {
           // only a slice of it, but at distances pass 2 does not visit. Merging
           // the two raised Quito's summit from 4007 m to 4565 — and at 90 m
           // postings a summit is one cell wide, so every extra look at it
-          // counts. The geometry is reproducible from hzAz and hzRings, so only
-          // the elevations need holding.
-          root.hzP1 = e
+          // counts. Held as offsets in metres so they can be re-projected onto
+          // a viewpoint that is not the place.
+          var pts = []
+          var kk = 1
+          for (var a3 = 0; a3 < root.hzAz; a3++) {
+            var ra = 2.0 * Math.PI * a3 / root.hzAz
+            for (var r3 = 0; r3 < root.hzRings.length; r3++) {
+              pts.push(root.hzRings[r3] * Math.sin(ra),
+                       root.hzRings[r3] * Math.cos(ra), e[kk]); kk++
+            }
+          }
+          root.hzPts = pts
+          root.hzTerrainAim = bestAz
           root.pushSky(); root.saveCache()
-          root.fetchHorizonFan(bestAz)
+          root.fetchNearField()
         } catch (err) { /* no ring: the scene keeps its default landscape */ }
       }
     }
@@ -1333,7 +1528,7 @@ Item {
             root.geoForSearch = false
             root.chosenLoc = nl
             root.fc = null; root.kp = null
-            root.ring = null; root.climate = null; root.horizon = null
+            root.ring = null; root.climate = null; root.horizon = null; root.water = null
             root._lastPush = -9999
             root.searching = false; root.searchNote = ""
           }
@@ -1438,6 +1633,9 @@ Item {
       property vector4d hills2: Qt.vector4d(root.defaultHills[8], root.defaultHills[9],
                                             root.defaultHills[10], root.defaultHills[11])
       property vector4d alt: Qt.vector4d(2.0, 2.0, 0.15, 0.006)
+      // near bank, wave scale, mirror compression. The default is a lake,
+      // which is what the scene drew everywhere before any of this.
+      property vector4d shore: Qt.vector4d(0.965, 1.0, 3.2, 0)
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.
