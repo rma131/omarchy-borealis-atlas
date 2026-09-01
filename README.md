@@ -11,6 +11,38 @@ It is 100% procedural. One fragment shader, no image assets.
 
 ![Reykjavik at night — aurora over the sea, with the moon at its real phase](docs/media/reykjavik-aurora.jpg)
 
+> The aurora scene began as a fork of
+> [marko-builds/borealis](https://github.com/marko-builds/borealis) (MIT) and is
+> still descended from it — the curtains, the starfield, the meteors and the
+> water are its design. What grew around it is new: a finger the light reacts
+> to, real weather, a measured horizon, and the 23-day scrub.
+
+## What it looks like
+
+Every image below is a real render at a real moment — a place, a date and an
+hour that the data actually had. Nothing is staged; where there is fog it is
+because there was fog.
+
+### One place, through a day
+
+Montreal, at its own true sunrise and sunset for that date.
+
+| | |
+|---|---|
+| ![Dawn](docs/media/light-dawn.jpg) | ![Midday](docs/media/light-day.jpg) |
+| **06:16 — sunrise.** Not six o'clock: the sun clears the horizon when it really does, and the moon is still up. | **Midday.** The far bank, Mount Royal on the skyline, and the near bank you are standing on. |
+| ![Sunset](docs/media/light-sunset.jpg) | ![Night](docs/media/light-night.jpg) |
+| **19:32 — sunset.** The day length comes from the date and the latitude, so this moves through the year. | **Night**, here at Reykjavik, with the aurora at whatever NOAA says the solar wind is doing. |
+
+### Weather it found, not weather it invented
+
+| | |
+|---|---|
+| ![Fog](docs/media/weather-fog.jpg) | ![Snow](docs/media/weather-snow.jpg) |
+| **Fog** — Montreal, 31 August, 08:00. The forecast said fog for that hour, so the scene is fogged. | **Snow** — Ushuaia, 12 September. Snow showers at 4.8 °C over 7 cm of lying snow, which is why the ground is white and the air is not clear. |
+
+### Places that look like themselves
+
 | | |
 |---|---|
 | ![Quito](docs/media/quito-pichincha.jpg) | ![Montreal](docs/media/montreal-river.jpg) |
@@ -18,11 +50,18 @@ It is 100% procedural. One fragment shader, no image assets.
 | ![Zermatt](docs/media/zermatt-snowline.jpg) | ![Tromso](docs/media/tromso-treeline.jpg) |
 | **Zermatt.** Snow lies above the freezing level and nowhere else, so the line cuts dead straight across the range, and it moves as you scrub through colder days. | **Tromso.** The treeline is about 700 m this far north, so the fjord ridges are forested at the bottom and bare above it. |
 
-> The aurora scene began as a fork of
-> [marko-builds/borealis](https://github.com/marko-builds/borealis) (MIT) and is
-> still descended from it — the curtains, the starfield, the meteors and the
-> water are its design. What grew around it is new: a finger the light reacts
-> to, real weather, a measured horizon, and the 23-day scrub.
+### The moon, at its real phase
+
+Same overlay, three different dates. The phase is arithmetic, not a picture.
+
+![Moon phases: full, waning gibbous, last quarter](docs/media/moon-phases.jpg)
+
+### Five palettes
+
+`aurora` by default; `ember`, `gold`, `nord` and `ice` are one key in
+`shell.json`, or a two-finger tap. Same place, same minute.
+
+![The aurora, ember, gold, nord and ice palettes](docs/media/palettes.jpg)
 
 ## Install
 
