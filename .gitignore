@@ -2,4 +2,8 @@
 # live in docs/media/ and are tracked; this only catches the ones left lying
 # around at the repo root by grim.
 /*.png
+# ...except the marketplace preview, which the listing looks for at the root by
+# this exact name. Without the exception the rule above silently swallows it and
+# the listing falls back to a generic image.
+!/preview.png
 *.bak
