@@ -47,10 +47,23 @@ layout(std140, binding = 0) uniform buf {
     // What the land here is like. Blended, not switched: the world has no hard
     // edges between a forest and a desert.
     vec4 land;    // x cold, y arid, z lush, w alpine
-    // Where the place is, as opposed to what its weather is. relief is the
-    // spread of elevation across ~100 km, water whether there is any, and the
-    // last two are the day's real sunrise and sunset as fractions of 24 h.
+    // Where the place is, as opposed to what its weather is. relief is how
+    // high the tallest thing in frame stands in apparent degrees, water whether
+    // there is any, and the last two the day's real sunrise and sunset as
+    // fractions of 24 h.
     vec4 geo;     // x relief, y water, z sunrise, w sunset
+    // The skyline, measured rather than invented: twelve coefficients of a
+    // half-range cosine fit to the real horizon around this place, sampled as
+    // apparent angle over a 150-degree window facing whatever rises highest.
+    // A cosine series and not a Fourier one because a Fourier fit forces
+    // profile(0) == profile(1) and puts a seam down the edge of the frame.
+    vec4 hills0;  // a0..a3
+    vec4 hills1;  // a4..a7
+    vec4 hills2;  // a8..a11
+    // The two horizontal lines that cut across it. Both are fractions of the
+    // ridge's own height, so 1.0 sits on the highest summit and anything above
+    // that means the line is off the top of the land and does not apply.
+    vec4 alt;     // x snowline, y treeline, z ridge rise in uv, w line softness
 };
 
 // The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every
@@ -83,6 +96,12 @@ float solarAlt(float td) {
   return (cos(6.28318531 * (td - mid)) - c0) / (1.0 + max(-c0, 0.0) * 0.85);
 }
 
+const float PI = 3.14159265;
+// The land never thins to a hairline: the profile is normalised to its own
+// range, so the lowest column would otherwise sit exactly on the waterline and
+// a flat place would have no shore at all. The altitude lines are lifted onto
+// the same scale, or the snowline would drift against the ridge it cuts.
+const float RIDGE_BASE = 0.18;
 const float WATERLINE = 0.82;
 const float HORIZON  = 0.795;   // where sun and moon cross
 const float SUN_ARC  = 0.62;    // how high the sun climbs at noon
@@ -527,25 +546,48 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
 
   // forested ridge standing on the waterline
   float fx = uv.x;
-  // Relief scales the harmonics as well as the overall height, because a plain
-  // has to read as a nearly straight horizon rather than as a shrunken mountain
-  // range. Measured from the spread of elevation across ~100 km, so Montreal
-  // comes out flat, Phoenix hilly and Zermatt jagged, instead of all three
-  // sharing the one amplitude this used to hard-code.
+  // This used to be three sines with hand-tuned constants, scaled by one
+  // relief number — so every place on earth got the same invented range, taller
+  // or shorter. It is now the horizon that is actually out there: the cosine
+  // series QML fitted to a fan of elevation samples, which puts Pichincha west
+  // of Quito and one 177 m swell west of Montreal because that is where they
+  // are. Written out flat rather than looped over an array: GLSL ES 1.00 will
+  // not index a uniform array by a non-constant, and there is no need to.
   float rel = geo.x;
-  float amp = mix(0.30, 1.15, rel);
-  float ridge = 0.5
-    + (0.30 * sin(fx * 3.1 + 0.6)
-     + 0.12 * sin(fx * 7.7 + 2.0)
-     + 0.06 * sin(fx * 15.3 + 4.1)) * amp;
-  ridge += 0.05 * rel * abs(sin(fx * 23.0 + 1.3));   // crags, only where rugged
-  // At full relief the harmonics swing far enough to put the ridge underwater
-  // on one side and off the top of the screen on the other; both ends are held.
-  ridge = clamp(ridge / 0.98, 0.06, 1.05);
-  // The floor keeps a readable far shore rather than a hairline: even flat
-  // country has a horizon you can see. The ceiling stops the Alps walling the
-  // sky off — this is a skyline, and the sky is most of what it is for.
-  float ridgeTop = WATERLINE - ridge * mix(0.09, 0.26, rel);
+  float ridge = hills0.x
+    + hills0.y * cos(PI *  1.0 * fx) + hills0.z * cos(PI *  2.0 * fx)
+    + hills0.w * cos(PI *  3.0 * fx) + hills1.x * cos(PI *  4.0 * fx)
+    + hills1.y * cos(PI *  5.0 * fx) + hills1.z * cos(PI *  6.0 * fx)
+    + hills1.w * cos(PI *  7.0 * fx) + hills2.x * cos(PI *  8.0 * fx)
+    + hills2.y * cos(PI *  9.0 * fx) + hills2.z * cos(PI * 10.0 * fx)
+    + hills2.w * cos(PI * 11.0 * fx);
+  ridge = RIDGE_BASE + (1.0 - RIDGE_BASE) * clamp(ridge, 0.0, 1.0);
+  // A twelve-term fit is smooth by construction and rock is not, so the fine
+  // detail stays synthetic — but only where the country is genuinely rugged.
+  // Two octaves, because one gave an even scallop that read as dunes.
+  ridge += rel * (0.042 * abs(sin(fx * 23.0 + 1.3))
+                + 0.020 * abs(sin(fx * 51.0 + 4.7)));
+  // alt.z is how tall all of that stands, in uv. Both ends of its range are
+  // held in QML: even flat country has a horizon you can see, and the Alps
+  // walling off the sky was a bug once already.
+  float ridgeTop = WATERLINE - ridge * alt.z;
+
+  // Altitude reads as a horizontal line across the picture, because that is
+  // what a contour is: a snowline cuts straight through a range, it does not
+  // drape itself over each crest in turn. Both lines are fractions of the
+  // ridge's own height, so a value past 1.0 lifts the line clear of every
+  // summit and it simply stops applying — which is Quito on nineteen days out
+  // of twenty, and is why this needs no separate "has snow" flag.
+  float snowY = WATERLINE - (RIDGE_BASE + (1.0 - RIDGE_BASE) * alt.x) * alt.z;
+  float treeY = WATERLINE - (RIDGE_BASE + (1.0 - RIDGE_BASE) * alt.y) * alt.z;
+  // Trees stand on the crest, so what decides whether they grow is the height
+  // of the crest, not the height of the pixel. The band is wide where the ridge
+  // is tall — about a tenth of its height, which is a couple of hundred metres
+  // of altitude on a real mountain, and is roughly how long a treeline takes to
+  // give up. At the snowline's width instead, the crossing was a knife edge:
+  // one column of forest, then a vertical seam, then bare rock.
+  float treeBand = max(alt.z * 0.10, 0.004);
+  float aboveTree = smoothstep(treeY + treeBand, treeY - treeBand, ridgeTop);
 
   float tw = 170.0;
   float cell = floor(fx * tw);
@@ -556,9 +598,13 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   // Genuinely hot, not merely green: lush reaches 0.72 around a 21 C mean, and
   // below that a temperate lakeside was growing palms.
   float palm = clamp((land.z - 0.72) * 3.0, 0.0, 1.0) * (1.0 - land.x) * geo.y;
-  // Dry ground, bare rock and hard cold all thin the treeline out.
+  // Dry ground, bare rock and hard cold all thin the treeline out — and above
+  // the treeline proper, nothing grows at all. The line is where it really is:
+  // roughly 3500 m at the equator falling 40 m per degree of latitude, which
+  // is why Quito's 2920 m floor is forest and the top of Pichincha is not.
   float bare = clamp(0.12 + 0.80 * max(land.y, land.w) + 0.40 * land.x
                      + 0.25 * palm, 0.0, 0.97);
+  bare = mix(bare, 0.97, aboveTree);
   float grow = (1.0 - land.y) * (1.0 - 0.85 * land.w) * (0.45 + 0.75 * land.z);
   float th = (hcell < bare) ? 0.0
            : (0.004 + 0.012 * hcell) * clamp(grow, 0.15, 1.4) * (1.0 + 1.3 * palm);
@@ -581,8 +627,12 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     vec3 gFar  = mix(vec3(24.0, 34.0, 26.0), vec3( 98.0,  80.0, 56.0), land.y);
     gNear = mix(gNear, vec3(38.0, 80.0, 42.0), land.z);
     gFar  = mix(gFar,  vec3(16.0, 42.0, 24.0), land.z);
-    gNear = mix(gNear, vec3(98.0, 100.0, 106.0), land.w);
-    gFar  = mix(gFar,  vec3(54.0,  57.0,  64.0), land.w);
+    // Bare rock is what is above the treeline, not what is high above the sea.
+    // land.w still speaks for the ground you are standing on; aboveTree speaks
+    // for the crest, and a valley floor under a bare summit needs both.
+    float rock = max(land.w, aboveTree);
+    gNear = mix(gNear, vec3(98.0, 100.0, 106.0), rock);
+    gFar  = mix(gFar,  vec3(54.0,  57.0,  64.0), rock);
     // night keeps its blue, warmed a little over dry ground
     vec3 nNear = mix(vec3(11.0, 14.0, 24.0), vec3(22.0, 18.0, 20.0), land.y * 0.7);
     vec3 nFar  = mix(vec3( 4.0,  5.0,  9.0), vec3(10.0,  8.0,  8.0), land.y * 0.7);
@@ -590,9 +640,12 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     mtn += vec3(0.030, 0.045, 0.060) * exp(-into * 50.0);
     mtn += auroraCol * 0.30;   // the land is bathed in it, not lit past it
 
-    // Height keeps its own snow, quite apart from today's weather.
-    float capAmt = clamp((land.w - 0.22) * 1.7, 0.0, 1.0)
-                 * (0.35 + 0.65 * rel) * exp(-into * 3.2);
+    // Snow lies above the freezing level and nowhere else. This used to key off
+    // land.w — the observer's own height above the sea — which put Quito at
+    // alpine 1.0 and drew the entire city as grey rock under permanent caps.
+    // Now it is one comparison against a real altitude, so the same mountain is
+    // bare in the afternoon and white after a cold night, which is what it does.
+    float capAmt = smoothstep(snowY + alt.w, snowY - alt.w, uv.y);
     if (capAmt > 0.0)
       mtn = mix(mtn, vec3(0.88, 0.91, 0.96) * (0.16 + 0.84 * lit), capAmt * 0.88);
 

@@ -296,6 +296,7 @@ Item {
   onFcChanged: { _lastPush = -9999; dataRev++; pushSky(); refreshReadout() }
   onKpChanged: { _lastPush = -9999; dataRev++; pushSky() }
   onRingChanged: { _lastPush = -9999; pushSky() }
+  onHorizonChanged: { _lastPush = -9999; pushSky() }
   onClimateChanged: { _lastPush = -9999; pushSky() }
   // sky angular speed, for motion blur
   property real todVel: 0
@@ -342,7 +343,8 @@ Item {
       if (!root.chosenLoc) return
       root.chosenLoc = null
       root.loc = null; root.fc = null; root.kp = null
-      root.ring = null; root.climate = null; root._lastPush = -9999
+      root.ring = null; root.climate = null; root.horizon = null
+      root._lastPush = -9999
       refreshSky(true)
       return
     }
@@ -359,14 +361,25 @@ Item {
   // archive took to answer — and wrote that pairing into the cache.
   onConfigLocChanged: {
     root.loc = null; root.ring = null; root.climate = null
-    root.fc = null; root.kp = null
+    root.horizon = null; root.fc = null; root.kp = null
     refreshSky(true)
   }
 
   property var loc: null      // { lat, lon, name, country }
   property real elevation: 0
-  property var ring: null     // { spread (m across ~100 km), sea (0..1) }
+  property var ring: null     // { spread (m across ~50 km), sea (0..1) }
   property var climate: null  // { ai } — a year of P / PET
+  // { coef[12] the cosine fit, maxAng the highest thing in frame in degrees,
+  //   base the altitude the ridge stands on and span the metres from there to
+  //   its highest point — which is what turns a freezing level into a snowline }
+  property var horizon: null
+
+  // Where trees stop, which is not a fixed altitude: about 3500 m at the
+  // equator, falling roughly 40 m per degree of latitude. Quito sits at 2920 m
+  // and is therefore below its own treeline and green, while the top of
+  // Pichincha is above it and bare — which the old sea-level `alpine` had
+  // exactly backwards, drawing the whole city as grey rock.
+  readonly property real treeline: 3500.0 - 40.0 * (loc ? Math.abs(loc.lat) : 45)
 
   // What the land here is like, from what the forecast already tells us: how
   // cold, how dry, how high, how lush. Four scalars the shader blends between,
@@ -377,7 +390,9 @@ Item {
   function computeTerrain() {
     if (!fc || !fc.temp || !fc.temp.length)
       return { cold: 0.35, arid: 0.15, lush: 0.25, alpine: 0,
-               relief: ring ? Math.max(0, Math.min(1, (ring.spread - 30.0) / 1200.0)) : 0.5,
+               relief: horizon
+                 ? Math.pow(Math.max(0, Math.min(1, horizon.maxAng / 20.0)), 0.8)
+                 : ring ? Math.max(0, Math.min(1, (ring.spread - 30.0) / 1200.0)) : 0.5,
                water: 1.0 }
     var n = fc.temp.length, ts = 0, ps = 0
     for (var i = 0; i < n; i++) { ts += fc.temp[i] || 0; ps += fc.precip[i] || 0 }
@@ -391,7 +406,7 @@ Item {
     // The three-week fallback is only what shows before the archive lands.
     var arid   = climate ? cl((0.55 - climate.ai) / 0.50)
                          : cl(1.0 - mmDay / 2.2)
-    var alpine = cl((root.elevation - 900) / 1800)
+    var alpine = cl((root.elevation - root.treeline) / 900)
     // Vegetation follows water, not warmth: Phoenix is hotter than Montreal and
     // far greener by this measure until the aridity index gets a say. Without
     // it, a desert came out lush 0.45 and the ground was drawn forest green.
@@ -400,12 +415,15 @@ Item {
     // very high latitude thins the treeline regardless of the local average
     cold = Math.max(cold, cl((absLat - 58.0) / 12.0) * 0.85)
 
-    // How high the skyline stands, measured rather than assumed: the spread of
-    // elevation across the ring. Montreal comes out near flat at 63 m, Phoenix
-    // ringed by real mountains at 414, Zermatt off the top at 2345.
-    // 0.5 is the default because it reproduces exactly the amplitude the ridge
-    // had before this was measured, so a failed lookup changes nothing.
-    var relief = ring ? cl((ring.spread - 30.0) / 1200.0) : 0.5
+    // How high the skyline stands — the apparent angle of the tallest thing in
+    // frame, which is what you actually see rather than a spread in metres.
+    // Dubai 0.01, Sahara 0.01, Phoenix 0.08, Montreal 0.19, Quito 0.53,
+    // Tromso 0.60, Zermatt 1.0. The metre spread is kept as the fallback for
+    // as long as the second pass has not landed, and 0.5 beyond that because
+    // it reproduces the amplitude the ridge had before any of this was
+    // measured, so a failed lookup changes nothing.
+    var relief = horizon ? Math.pow(cl(horizon.maxAng / 20.0), 0.8)
+               : ring ? cl((ring.spread - 30.0) / 1200.0) : 0.5
 
     // Sea shows up in the ring as points at zero. Lakes and rivers do not —
     // they sit above sea level — so standing water inland is inferred from the
@@ -524,7 +542,7 @@ Item {
     var hr = todValue * 24.0
     var o = { cloud: 0, rain: 0, snow: 0, storm: 0, fog: 0,
               snowCover: 0, frozen: 0, verglas: 0, wind: 0,
-              rise: 0.25, set: 0.75,
+              rise: 0.25, set: 0.75, flz: null,
               temp: null, cond: "", kp: null, aurora: auroraFloor, has: false }
 
     // The hourly samples start at midnight of the first day, so the day index
@@ -555,6 +573,18 @@ Item {
       o.storm = mixw(wA.storm, wB.storm) * Math.min(1, 0.35 + wetRate)
       o.fog   = mixw(wA.fog,   wB.fog)
       if (o.storm > 0) o.rain = Math.max(o.rain, o.storm * 0.8)
+
+      // The height of the 0 C isotherm, which is where snow starts lying on the
+      // mountains whatever it is doing down here. Not every model carries it —
+      // Tromso comes back 48/48 null with units "undefined" — so where it is
+      // missing it is estimated from the surface temperature and the standard
+      // 6.5 C/km lapse rate. Checked where both exist: Montreal 3153 m against
+      // 3291 measured, Quito 5228 against 4925. Good to a few hundred metres,
+      // which is well inside what a painted snowline needs.
+      var fa = fc.flz ? fc.flz[i] : null, fb = fc.flz ? fc.flz[i + 1] : null
+      o.flz = (fa !== null && fa !== undefined && fb !== null && fb !== undefined)
+            ? fa + (fb - fa) * f
+            : (o.temp !== null ? root.elevation + o.temp / 0.0065 : null)
 
       // snow_depth is the ground truth for "does it settle": falling snow that
       // melts leaves this at zero, a white landscape does not. 25 cm reads full.
@@ -635,6 +665,32 @@ Item {
     var tr = root.computeTerrain()
     scene.land = Qt.vector4d(tr.cold, tr.arid, tr.lush, tr.alpine)
     scene.geo = Qt.vector4d(tr.relief, tr.water, o.rise, o.set)
+
+    var c = root.horizon ? root.horizon.coef : root.defaultHills
+    scene.hills0 = Qt.vector4d(c[0], c[1], c[2],  c[3])
+    scene.hills1 = Qt.vector4d(c[4], c[5], c[6],  c[7])
+    scene.hills2 = Qt.vector4d(c[8], c[9], c[10], c[11])
+
+    // How tall the ridge stands on screen. Both ends are the old hard-coded
+    // range's, kept deliberately: even flat country has a horizon you can see,
+    // and the Alps walling off the sky was a bug once already — this is a
+    // skyline, and the sky is most of what it is for.
+    // Dubai lands at 0.062, Montreal 0.096, Quito 0.211, Zermatt 0.26.
+    var rise = 0.06 + 0.20 * tr.relief
+
+    // Both lines start off the top of the land, which is the same as absent —
+    // no separate flag, and a place with no profile yet simply has no snowline
+    // rather than an arbitrary one.
+    var snowF = 2.0, treeF = 2.0
+    var hz = root.horizon
+    if (hz && hz.span > 0) {
+      if (o.flz !== null && o.flz !== undefined)
+        snowF = (o.flz - hz.base) / hz.span
+      treeF = (root.treeline - hz.base) / hz.span
+    }
+    // Softness in uv. Wider than a pixel so the line does not crawl, tight
+    // enough that it reads as a line and not as a gradient.
+    scene.alt = Qt.vector4d(snowF, treeF, rise, 0.006)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -684,12 +740,12 @@ Item {
     lastFetchMs = Date.now()
     if (root.chosenLoc) {
       root.loc = root.chosenLoc
-      fetchForecast(); fetchKp(); fetchElevation(); fetchClimate()
+      fetchForecast(); fetchKp(); fetchHorizon(); fetchClimate()
       return
     }
     var c = configLoc
     if (c && c.lat !== undefined) {
-      root.loc = c; fetchForecast(); fetchKp(); fetchElevation(); fetchClimate(); return
+      root.loc = c; fetchForecast(); fetchKp(); fetchHorizon(); fetchClimate(); return
     }
     if (c && c.name) { geocode(c.name); return }
     // No shortcut on an existing loc: the IP can move (a VPN, or actually
@@ -728,6 +784,7 @@ Item {
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
       + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
       + ",snowfall,snow_depth,soil_temperature_0cm,wind_speed_10m,wind_direction_10m"
+      + ",freezing_level_height"
       + "&daily=sunrise,sunset,daylight_duration"
       + "&past_days=7&forecast_days=16&timezone=auto"]   // 16 is the API max
     fcProc.running = true
@@ -758,28 +815,113 @@ Item {
     climProc.running = true
   }
 
-  // How rugged the country is, and whether there is sea in it — from one call.
-  // Nine points, a centre and a ring at roughly 50 km, which describes the
-  // skyline you would see rather than the ground under your feet.
-  function fetchElevation() {
+  // ---- the horizon, measured -------------------------------------------------
+  // The skyline used to be three sines with hand-tuned constants, scaled by one
+  // relief number, so every place on earth got the same invented range. It is
+  // now the country that is actually out there, in two passes of a hundred
+  // points — a hundred exactly, because the elevation API takes 100 coordinates
+  // and answers 101 with a 400.
+  //
+  //   pass 1  a centre and 33 azimuths at 4, 11 and 25 km. Does the old job
+  //           (spread for relief, points at sea level for water) and says which
+  //           way the country rises.
+  //   pass 2  20 azimuths across the 150 degrees facing that way, five
+  //           distances each. This is the profile that gets drawn.
+  //
+  // Together they find 4565 m west of Quito — Pichincha, and within 80 m of
+  // what this dataset holds anywhere on that massif — and one 177 m swell 2 km
+  // west of Montreal, which is Mount Royal and nothing else. Pass 2 on its own
+  // found only 4007 m, and the merge is what makes the snow work: it is the
+  // last few hundred metres that the freezing level actually crosses.
+  readonly property var hzRings: [4000, 11000, 25000]
+  readonly property int hzAz: 33
+  readonly property var hzFan: [2500, 6000, 11000, 18000, 27000]
+  readonly property int hzFanAz: 20
+  readonly property real hzFov: 150.0
+  // twice the earth's radius with the standard 7/6 optical correction, so a
+  // distant summit is not pushed below the horizon by curvature it does not
+  // visually suffer
+  readonly property real hzTwoR: 14865667.0
+  // The cosine fit of the ridge that used to be hard-coded, at its old mid
+  // relief and rescaled to the height this draws it at. Nothing but a fallback:
+  // it is what shows before the first pass answers, and what stays if it never
+  // does.
+  readonly property var defaultHills: [
+     0.7376,  0.0982, -0.0576,  0.0779,
+    -0.0566, -0.0229,  0.0079,  0.0035,
+    -0.0001,  0.0022, -0.0007,  0.0015]
+
+  function offsetLL(lat, lon, d, azDeg) {
+    var a = azDeg * Math.PI / 180
+    var la = lat + (d * Math.cos(a)) / 111320.0
+    var lo = lon + (d * Math.sin(a))
+                 / (111320.0 * Math.max(0.05, Math.cos(lat * Math.PI / 180)))
+    la = Math.max(-89.5, Math.min(89.5, la))
+    while (lo > 180) lo -= 360
+    while (lo < -180) lo += 360
+    return [la, lo]
+  }
+
+  // How high something d metres away and h metres up appears to stand. This
+  // decides which way to face and how tall to draw the whole ridge — 177 m of
+  // Mount Royal at 2 km reads as 2.3 degrees, a 4565 m Pichincha at 11 km as
+  // 14. It deliberately does not decide the ridge's shape: see the fan handler.
+  function apparentDeg(h, h0, d) {
+    return Math.atan2(h - h0 - d * d / root.hzTwoR, d) * 180 / Math.PI
+  }
+
+  function elevationUrl(la, lo) {
+    return "https://api.open-meteo.com/v1/elevation?latitude=" + la.join(",")
+         + "&longitude=" + lo.join(",")
+  }
+
+  function fetchHorizon() {
     if (!loc || elevProc.running) return
-    var dLat = 0.45
-    // a degree of longitude shrinks toward the poles; keep the ring circular
-    var dLon = 0.45 / Math.max(0.20, Math.cos(loc.lat * Math.PI / 180))
-    var oct = [[0, 0], [1, 0], [0.71, 0.71], [0, 1], [-0.71, 0.71],
-               [-1, 0], [-0.71, -0.71], [0, -1], [0.71, -0.71]]
-    var la = [], lo = []
-    for (var i = 0; i < oct.length; i++) {
-      var y = Math.max(-89.5, Math.min(89.5, loc.lat + oct[i][0] * dLat))
-      var x = loc.lon + oct[i][1] * dLon
-      while (x > 180) x -= 360
-      while (x < -180) x += 360
-      la.push(y.toFixed(4)); lo.push(x.toFixed(4))
+    var la = [loc.lat.toFixed(4)], lo = [loc.lon.toFixed(4)]
+    for (var k = 0; k < root.hzAz; k++) {
+      var az = 360.0 * k / root.hzAz
+      for (var r = 0; r < root.hzRings.length; r++) {
+        var pt = root.offsetLL(loc.lat, loc.lon, root.hzRings[r], az)
+        la.push(pt[0].toFixed(4)); lo.push(pt[1].toFixed(4))
+      }
     }
-    elevProc.command = ["curl", "-fsS", "--max-time", "8",
-      "https://api.open-meteo.com/v1/elevation?latitude=" + la.join(",")
-      + "&longitude=" + lo.join(",")]
+    elevProc.command = ["curl", "-fsS", "--max-time", "8", root.elevationUrl(la, lo)]
     elevProc.running = true
+  }
+
+  property real hzH0: 0        // the observer's own ground, from the DEM
+  property var hzP1: null      // pass 1's elevations, for pass 2 to fold in
+  property real hzAim: 0       // the azimuth the view faces
+  function fetchHorizonFan(centreAz) {
+    if (!loc || fanProc.running) return
+    var la = [], lo = []
+    for (var j = 0; j < root.hzFanAz; j++) {
+      var az = centreAz - root.hzFov * 0.5
+             + root.hzFov * j / (root.hzFanAz - 1)
+      for (var r = 0; r < root.hzFan.length; r++) {
+        var pt = root.offsetLL(loc.lat, loc.lon, root.hzFan[r], az)
+        la.push(pt[0].toFixed(4)); lo.push(pt[1].toFixed(4))
+      }
+    }
+    root.hzAim = centreAz
+    fanProc.command = ["curl", "-fsS", "--max-time", "8", root.elevationUrl(la, lo)]
+    fanProc.running = true
+  }
+
+  // Twelve terms of a half-range cosine series. A cosine fit and not a Fourier
+  // one on purpose: a Fourier fit forces profile(0) == profile(1) and puts a
+  // seam down the edge of the frame. Twelve places the summit within 0.03 of
+  // where it belongs and fits in three vec4s; eight was visibly soft.
+  function cosineFit(f, terms) {
+    var n = f.length, a = [], sum = 0
+    for (var i = 0; i < n; i++) sum += f[i]
+    a.push(sum / n)
+    for (var k = 1; k < terms; k++) {
+      var c = 0
+      for (var m = 0; m < n; m++) c += f[m] * Math.cos(Math.PI * k * (m + 0.5) / n)
+      a.push(2.0 * c / n)
+    }
+    return a
   }
 
   function fetchKp() {
@@ -791,6 +933,7 @@ Item {
     if (!loc) return
     var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
                     ring: ring, elevation: elevation, climate: climate,
+                    horizon: horizon, hzH0: hzH0,
                     chosen: chosenLoc }
     // base64 through argv: no quoting or escaping can go wrong
     cacheWriteProc.command = ["sh", "-c",
@@ -813,9 +956,10 @@ Item {
       loc = c.loc; fc = c.fc || null; kp = c.kp || null
       ring = c.ring || null; elevation = c.elevation || 0
       climate = c.climate || null
+      horizon = c.horizon || null; hzH0 = c.hzH0 || 0
       lastFetchMs = c.at || 0
       pushSky()
-      if (!ring) fetchElevation()
+      if (!ring || !horizon) fetchHorizon()
       if (!climate) fetchClimate()
       // the cache says where you were, not where you are
       checkLocation(true)
@@ -929,9 +1073,10 @@ Item {
                           || Math.abs(nl.lon - root.loc.lon) > 0.2
     root.loc = nl
     if (moved) { root.fc = null; root.kp = null; root.ring = null
-                 root.climate = null; root._lastPush = -9999 }
+                 root.climate = null; root.horizon = null
+                 root._lastPush = -9999 }
     root.fetchForecast(); root.fetchKp()
-    if (moved || !root.ring) root.fetchElevation()
+    if (moved || !root.ring || !root.horizon) root.fetchHorizon()
     if (moved || !root.climate) root.fetchClimate()
   }
 
@@ -977,6 +1122,88 @@ Item {
   }
 
   Process {
+    id: fanProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var e = JSON.parse(String(text || "")).elevation
+          var want = root.hzFanAz * root.hzFan.length
+          if (!e || e.length < want) return
+          var h0 = root.hzH0
+
+          // One value per screen column: the highest ground along that bearing.
+          // Altitude and not apparent angle, and the difference matters: a
+          // near 3400 m ridge subtends more than Pichincha does behind it, so
+          // an angular profile drew the near ridge as the summit and scaled
+          // Quito's mountain at 718 m of altitude per unit of ridge when the
+          // truth is 1707 — which put the snowline on the wrong mountain and,
+          // being past the top of it, on no mountain at all. Height is what
+          // snow and trees answer to, so height is what the shape is made of;
+          // how big the whole thing looks is a separate number, and that one
+          // is angular.
+          //
+          // No floor at the observer's own height, tempting as it looks: the
+          // drawn ridge is normalised between its own lowest and highest column
+          // and can never fall below the waterline anyway, so the floor bought
+          // nothing — and it broke the one case it was supposed to help.
+          // The geocoder puts "Montreal" on top of Mount Royal, where every
+          // direction is downhill; floored, all twenty columns came back equal,
+          // the profile normalised to zero, and the land vanished entirely.
+          var col = [], ang = [], i = 0
+          for (var j = 0; j < root.hzFanAz; j++) {
+            var bh = -12000, ba = -999
+            for (var r = 0; r < root.hzFan.length; r++) {
+              if (e[i] > bh) bh = e[i]
+              var a = root.apparentDeg(e[i], h0, root.hzFan[r])
+              if (a > ba) ba = a
+              i++
+            }
+            col.push(bh); ang.push(ba)
+          }
+
+          // Fold in whatever pass 1 saw inside this window, at its own
+          // distances. Purely extra evidence about the same ground.
+          var p1 = root.hzP1
+          if (p1 && p1.length >= 1 + root.hzAz * root.hzRings.length) {
+            var half = root.hzFov * 0.5
+            var step = root.hzFov / (root.hzFanAz - 1)
+            var k = 1
+            for (var a2 = 0; a2 < root.hzAz; a2++) {
+              var rel = ((360.0 * a2 / root.hzAz - root.hzAim + 540.0) % 360.0) - 180.0
+              for (var r2 = 0; r2 < root.hzRings.length; r2++) {
+                var hv = p1[k]; k++
+                if (Math.abs(rel) > half) continue
+                var c = Math.round((rel + half) / step)
+                c = Math.max(0, Math.min(root.hzFanAz - 1, c))
+                if (hv > col[c]) col[c] = hv
+                var av = root.apparentDeg(hv, h0, root.hzRings[r2])
+                if (av > ang[c]) ang[c] = av
+              }
+            }
+          }
+
+          var hMin = col[0], hMax = col[0], maxAng = ang[0]
+          for (var q = 1; q < col.length; q++) {
+            if (col[q] < hMin) hMin = col[q]
+            if (col[q] > hMax) hMax = col[q]
+            if (ang[q] > maxAng) maxAng = ang[q]
+          }
+          // A metre of altitude is worth this much of the drawn ridge, which is
+          // the whole of what the snowline and the treeline need to know.
+          var span = Math.max(hMax - hMin, 1.0)
+          var f = []
+          for (var w = 0; w < col.length; w++) f.push((col[w] - hMin) / span)
+
+          root.horizon = { coef: root.cosineFit(f, 12), maxAng: maxAng,
+                           base: hMin, span: span }
+          root.pushSky(); root.saveCache()
+        } catch (err) { /* no profile: the ridge falls back to its old shape */ }
+      }
+    }
+  }
+
+  Process {
     id: fcProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -992,6 +1219,7 @@ Item {
                       snowfall: h.snowfall, depth: h.snow_depth,
                       soil: h.soil_temperature_0cm,
                       wspd: h.wind_speed_10m, wdir: h.wind_direction_10m,
+                      flz: h.freezing_level_height || null,
                       rise: sr.rise, set: sr.set }
           root.pushSky(); root.saveCache()
         } catch (e) {}
@@ -1049,7 +1277,9 @@ Item {
       onStreamFinished: {
         try {
           var e = JSON.parse(String(text || "")).elevation
-          if (!e || !e.length) return
+          var want = 1 + root.hzAz * root.hzRings.length
+          if (!e || e.length < want) return
+          var h0 = e[0]
           var lo = e[0], hi = e[0], sea = 0
           for (var i = 0; i < e.length; i++) {
             var v = e[i] || 0
@@ -1060,7 +1290,28 @@ Item {
             if (v <= 0.5) sea++
           }
           root.ring = { spread: hi - lo, sea: sea / e.length }
+
+          // Which way to face. The most prominent thing on the horizon wins,
+          // so the peak a place is known for is always in frame — at the price
+          // that the view no longer points any particular compass direction,
+          // and the sun keeps rising on the left whichever way you are looking.
+          var bestAng = -999, bestAz = 0, k = 1
+          for (var a = 0; a < root.hzAz; a++) {
+            for (var r = 0; r < root.hzRings.length; r++) {
+              var ang = root.apparentDeg(e[k], h0, root.hzRings[r]); k++
+              if (ang > bestAng) { bestAng = ang; bestAz = 360.0 * a / root.hzAz }
+            }
+          }
+          root.hzH0 = h0
+          // Kept, not thrown away: pass 1 samples the whole compass and pass 2
+          // only a slice of it, but at distances pass 2 does not visit. Merging
+          // the two raised Quito's summit from 4007 m to 4565 — and at 90 m
+          // postings a summit is one cell wide, so every extra look at it
+          // counts. The geometry is reproducible from hzAz and hzRings, so only
+          // the elevations need holding.
+          root.hzP1 = e
           root.pushSky(); root.saveCache()
+          root.fetchHorizonFan(bestAz)
         } catch (err) { /* no ring: the scene keeps its default landscape */ }
       }
     }
@@ -1082,11 +1333,12 @@ Item {
             root.geoForSearch = false
             root.chosenLoc = nl
             root.fc = null; root.kp = null
-            root.ring = null; root.climate = null; root._lastPush = -9999
+            root.ring = null; root.climate = null; root.horizon = null
+            root._lastPush = -9999
             root.searching = false; root.searchNote = ""
           }
           root.loc = nl
-          root.fetchForecast(); root.fetchKp(); root.fetchElevation(); root.fetchClimate()
+          root.fetchForecast(); root.fetchKp(); root.fetchHorizon(); root.fetchClimate()
           root.saveCache()
         } catch (e) {
           if (root.geoForSearch) {
@@ -1174,6 +1426,18 @@ Item {
       // replaced: 0.5 relief is the old fixed ridge amplitude, 1.0 water the
       // lake that used to be unconditional, 0.25/0.75 the old six-to-six day.
       property vector4d geo: Qt.vector4d(0.5, 1.0, 0.25, 0.75)
+      // The measured skyline, and the two altitude lines cutting across it.
+      // The defaults are the cosine fit of the ridge this replaced, at its old
+      // mid relief, so an overlay opened with no data and no cache draws
+      // exactly the horizon it used to — and both lines start above every
+      // summit, which is the same as having none.
+      property vector4d hills0: Qt.vector4d(root.defaultHills[0], root.defaultHills[1],
+                                            root.defaultHills[2], root.defaultHills[3])
+      property vector4d hills1: Qt.vector4d(root.defaultHills[4], root.defaultHills[5],
+                                            root.defaultHills[6], root.defaultHills[7])
+      property vector4d hills2: Qt.vector4d(root.defaultHills[8], root.defaultHills[9],
+                                            root.defaultHills[10], root.defaultHills[11])
+      property vector4d alt: Qt.vector4d(2.0, 2.0, 0.15, 0.006)
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.

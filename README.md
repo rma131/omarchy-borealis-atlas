@@ -72,6 +72,15 @@ The earlier additive-bloom version was free at idle; this one is not. If you wan
 that back, the lever is the reflection tap count (five taps in `main()`), not the
 touch code.
 
+**The measured skyline was not measurable.** The ridge went from four
+transcendentals per fragment to twelve when it stopped inventing its harmonics
+and started summing the fitted ones. Interleaved back to back in one session,
+before/after/before/after: 1036, 1016, 972, 1007 MHz. The gap between the two
+*identical* "before" runs is 6.6 %, larger than any before-to-after difference,
+so this says nothing except that the change is smaller than the noise floor of
+this machine. No claim is made either way. The two elevation requests are the
+real cost, and they happen once per location change.
+
 ## A real sky
 
 The scene is driven by actual data, resolved in QML and handed to the shader as a
@@ -203,9 +212,12 @@ biomes, because the world has no hard edges:
 | `cold` | mean temperature, latitude | conifers sharpen, the treeline thins, water runs to steel |
 | `arid` | aridity index | ground goes to sand, trees disappear |
 | `lush` | aridity index, temperature | deep saturated canopy, rounder crowns, water toward turquoise |
-| `alpine` | elevation | bare rock, and snow on the tops regardless of today's weather |
-| `relief` | elevation ring | how high and how jagged the skyline stands |
+| `alpine` | elevation against the local treeline | bare rock on the ground you stand on |
+| `relief` | how tall the horizon looks, in degrees | how high the skyline stands |
 | `water` | elevation ring, aridity index | whether there is a lake at all |
+
+Two more are altitudes rather than scalars, and become horizontal lines across
+the picture: see **The skyline is the one that is really there** below.
 
 **Aridity is a climate, not a fortnight.** Asking the 23-day forecast window put
 Phoenix at 2.66 mm/day — a monsoon burst — and grew it a lush green lakeside. A
@@ -221,23 +233,6 @@ total does not:
 | Phoenix | 493 mm | 1808 mm | **0.27** |
 | Zermatt | 832 mm | 932 mm | **0.89** |
 | Montreal | 1027 mm | 858 mm | **1.20** |
-
-**Relief comes from one request.** `api.open-meteo.com/v1/elevation` takes
-comma-separated coordinate lists, so a nine-point ring at roughly 50 km costs a
-single call, and the spread across it is the skyline:
-
-| | ring spread | `relief` | skyline |
-|---|---|---|---|
-| Montreal | 142 m | 0.09 | flat, a low treeline |
-| Dubai | 266 m | 0.20 | low coast |
-| Phoenix | 302 m | 0.23 | shallow hills |
-| Tromso | 855 m | 0.69 | fjord ridges |
-| Zermatt | 2213 m | 1.00 | jagged, crags on the crest |
-
-Relief scales the ridge harmonics as well as its height, because a plain has to
-read as a nearly straight horizon rather than as a shrunken mountain range. Both
-ends are held: the ridge may not dip below the waterline, and may not wall off
-the sky — this is a skyline, and the sky is most of what it is for.
 
 **Where there is no water, a sand sea.** The lake used to be unconditional; the
 Sahara got one. Sea shows up in the ring as points at zero elevation, but lakes
@@ -259,6 +254,85 @@ Tree shape is a single exponent on the silhouette — high for conifers, low for
 rounded canopy, higher still and taller for palms on a hot wet coast. Drawn 170
 across, a tree is a few pixels tall, so shape can only mean proportion; that is
 enough to read as a palm, and it costs one `pow`.
+
+### The skyline is the one that is really there
+
+The ridge used to be three sines with hand-tuned constants, scaled by a single
+relief number — so Quito and Kathmandu got the same invented range, taller or
+shorter. It is now the country that is actually out there, measured in two
+requests of a hundred coordinates. A hundred exactly: the elevation API accepts
+100 and answers 101 with a `400`.
+
+- **Pass 1** — a centre and 33 azimuths at 4, 11 and 25 km. Does the old job
+  (spread for the terrain scalars, points at zero elevation for water) and, from
+  the largest apparent angle, says which way the country rises. That is the way
+  the view faces.
+- **Pass 2** — 20 azimuths across the 150° facing that way, five distances each,
+  merged with whatever pass 1 already saw inside the same window.
+
+Apparent angle is `atan((h − h₀ − d²/2R) / d)` with `R` the earth's radius times
+7/6, the standard optical correction, so a distant summit is not pushed below
+the horizon by curvature it does not visually suffer.
+
+**Shape comes from altitude, size from angle.** These are not the same question
+and conflating them was the one real dead end. A near 3400 m ridge subtends more
+than Pichincha does behind it, so a profile built from apparent angle drew the
+near ridge as the summit — and scaled Quito's mountain at 718 m of altitude per
+unit of drawn ridge when the truth is 1707, which put the snowline past the top
+of a mountain that was not the right mountain anyway. So the silhouette is built
+from the highest *ground* along each bearing, and how tall the whole thing
+stands is a separate number taken from the angle:
+
+| | faces | tallest in frame | summit | `relief` | ridge height |
+|---|---|---|---|---|---|
+| Montreal | WSW | 2.3° | 177 m — Mount Royal, 2 km | 0.18 | 0.096 |
+| Tromso | — | 5.9° | 1165 m | 0.38 | 0.135 |
+| Quito | W | 14.1° | 4565 m — Pichincha, 11 km | 0.75 | 0.211 |
+| Zermatt | — | 26.8° | 4157 m | 1.00 | 0.260 |
+
+Twenty columns reach the shader as **twelve coefficients of a half-range cosine
+series** — a cosine fit and not a Fourier one, because a Fourier fit forces
+`profile(0) == profile(1)` and puts a seam down the edge of the frame. Twelve
+places the summit within 0.03 of where it belongs and fits in three `vec4`s;
+eight was visibly soft. The fit is smooth by construction and rock is not, so
+two octaves of synthetic crag ride on top, scaled by relief.
+
+**Snow lies above the freezing level and nowhere else.** `freezing_level_height`
+is one more hourly variable on the forecast call that already happens, so it
+costs nothing and already spans the whole scrub range. It becomes a fraction of
+the ridge's own height — `(flz − base) / span` — and the shader draws it as a
+**horizontal line**, because that is what a contour is: a snowline cuts straight
+through a range, it does not drape itself over each crest in turn. Past 1.0 the
+line clears every summit and there is simply no snow, which needs no flag.
+
+This is the whole of the behaviour Quito was asked for. Pichincha's top is at
+4565 m in this dataset; the freezing level over a typical three weeks runs
+4540–5430, so the mountain is bare almost always and carries a cap on the cold
+nights when the line dips under the summit. The city below never does. Zermatt,
+where the freezing level runs 3230–4740 against a 4157 m skyline, shows the line
+sweep hundreds of metres down the slope as you scrub from a warm day to a cold
+one.
+
+The treeline is the same machinery: roughly 3500 m at the equator falling 40 m
+per degree of latitude, so Quito's 2920 m floor is below its own 3491 m treeline
+and drawn green while the top of Pichincha is bare, and Zermatt's whole visible
+ridge is above the line and drawn as rock. `alpine` was rebased on this too — it
+used to mean "high above the sea", which put Quito at 1.0 and painted the entire
+city as grey rock under permanent caps.
+
+**Where it is soft.** The model is a 90 m DEM sampled a hundred points at a time,
+so a lone spire reads as a broad peak and a summit can come in a little low —
+Pichincha at 4565 against a published 4696, though a 100-point grid over the
+whole massif only reaches 4645, so most of that gap is the dataset's. A summit
+read low biases the snowline late rather than early. Features narrower than
+about 8° of arc are not resolved. And facing the terrain means the view no
+longer points any particular compass direction, so the sun still rises on the
+left in Quito while the mountain it lights is due west.
+
+Not every model carries `freezing_level_height` — Tromso returns 48/48 nulls
+with units `"undefined"` — so where it is missing it is estimated from the
+surface temperature and the standard 6.5 °C/km lapse rate. Checked where both
+exist: Montreal 3153 m against 3291 measured, Quito 5228 against 4925.
 
 ### Sunrise and sunset, where you actually are
 
