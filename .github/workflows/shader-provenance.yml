@@ -1,0 +1,84 @@
+name: Shader provenance
+
+# The one binary in this repository is shaders/aurora.frag.qsb, the qsb-compiled
+# form of shaders/aurora.frag. Qt cannot compile GLSL at runtime, so it has to be
+# shipped — which makes it an opaque artifact a user cannot read.
+#
+# This job removes the need to trust it. It rebuilds the artifact from source in
+# a clean container with a toolchain pinned to a single Arch Linux Archive
+# snapshot, and fails if the result is not byte-identical to the committed file.
+# The build is deterministic: same source and same qsb version give the same
+# bytes, verified both on the author's machine and in a clean container.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'shaders/**'
+      - '.github/workflows/shader-provenance.yml'
+  pull_request:
+    paths:
+      - 'shaders/**'
+      - '.github/workflows/shader-provenance.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  reproduce:
+    name: Rebuild the shader and prove it matches
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: archlinux:base
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      # One dated snapshot pins qt6-shadertools and every dependency it pulls,
+      # so this stays reproducible after Arch moves on. Bump deliberately, and
+      # expect the hash below to change when the qsb version does.
+      ARCH_SNAPSHOT: '2026/09/01'
+      EXPECTED_QSB: 'qt6-shadertools 6.11.2-1'
+    steps:
+      - name: Pin the toolchain to one Arch Linux Archive snapshot
+        run: |
+          set -eux
+          printf 'Server=https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' \
+            "$ARCH_SNAPSHOT" > /etc/pacman.d/mirrorlist
+          pacman -Syuu --noconfirm --needed qt6-shadertools git
+
+      - name: Record the exact tool version
+        run: |
+          set -eu
+          installed=$(pacman -Q qt6-shadertools)
+          echo "qsb package: $installed"
+          /usr/lib/qt6/bin/qsb --help 2>&1 | sed -n '2p'
+          if [ "$installed" != "$EXPECTED_QSB" ]; then
+            echo "::error::toolchain drifted: expected '$EXPECTED_QSB', got '$installed'." \
+                 "Bump ARCH_SNAPSHOT and the recorded digest together."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Rebuild from source and compare byte for byte
+        run: |
+          set -eu
+          /usr/lib/qt6/bin/qsb --glsl "100es,120,150" --hlsl 50 --msl 12 \
+            -o /tmp/rebuilt.qsb shaders/aurora.frag
+          echo "source   $(sha256sum shaders/aurora.frag     | cut -d' ' -f1)"
+          echo "shipped  $(sha256sum shaders/aurora.frag.qsb | cut -d' ' -f1)"
+          echo "rebuilt  $(sha256sum /tmp/rebuilt.qsb        | cut -d' ' -f1)"
+          if ! cmp -s /tmp/rebuilt.qsb shaders/aurora.frag.qsb; then
+            echo "::error::shaders/aurora.frag.qsb does not match a rebuild of" \
+                 "shaders/aurora.frag. Recompile and commit both together."
+            exit 1
+          fi
+          echo "aurora.frag.qsb reproduces exactly from aurora.frag."
+
+      - name: Attest the artifact
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: shaders/aurora.frag.qsb

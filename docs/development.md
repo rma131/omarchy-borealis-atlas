@@ -28,6 +28,12 @@ arriving.
 
 ## Rebuilding the shader
 
+The `.qsb` is the only binary in this repository, and it is reproducible: see
+[build-provenance.md](build-provenance.md) for the pinned toolchain, the exact
+command, the digests, and a one-command way for anyone to check the shipped
+artifact against a rebuild. CI enforces it. Always commit the `.frag` and the
+`.qsb` together.
+
 `qsb` ships in `qt6-shadertools` but is not on `PATH`:
 
     export PATH="$PATH:/usr/lib/qt6/bin"

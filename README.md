@@ -18,6 +18,10 @@ back, sixteen forward.
 Still 100% procedural. Still one fragment shader, still no image assets. That
 was his idea and it is worth keeping.
 
+The one binary here is the compiled shader, and you do not have to trust it:
+the build is deterministic and reproducible in one command — see
+[build provenance](docs/build-provenance.md).
+
 ![Reykjavik at night — aurora over the sea, with the moon at its real phase](docs/media/reykjavik-aurora.jpg)
 
 > **The aurora is his.** `curtain()`, `ramp()`, `vnoise()`, `hash21()`,
@@ -192,7 +196,9 @@ The interesting parts are all in [docs/design.md](docs/design.md) — how the
 horizon is measured rather than invented, how snow finds the freezing level, how
 water is detected by being the one flat thing in a terrain model, and what was
 tried and thrown away. [docs/development.md](docs/development.md) covers
-rebuilding the shader and clearing the QML cache.
+rebuilding the shader and clearing the QML cache, and
+[docs/build-provenance.md](docs/build-provenance.md) shows how to verify the
+one compiled artifact in this repository against its source.
 
 ## Credits
 
