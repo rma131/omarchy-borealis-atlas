@@ -1,8 +1,26 @@
-// Borealis — GPU-procedural aurora over water, ported from play/aurora.py
-// via lookdev/index.html (the browser page holds the tuning history).
-// Composition: curtains + stars + meteors + crescent moon + water + forested
-// ridge. Five palettes baked as constants, selected by the paletteIndex
-// uniform (single config surface, switches live).
+// Borealis Atlas — GPU-procedural sky over water.
+//
+// ORIGIN AND CREDIT. This file is a derivative of the aurora shader in
+// marko-builds/borealis (MIT), by Marko Stankovic, which he ported from his own
+// play/aurora.py via lookdev/index.html. 118 of his 171 substantive lines are
+// still here unchanged, and the ones that matter most are entirely his:
+//
+//   ramp()     the six-stop colour interpolation, and the palettes it walks
+//   curtain()  the aurora itself — not one character altered
+//   meteors()  the streaks
+//   vnoise()   value noise, used by everything
+//   hash21()   the hash all of it is seeded from
+//   dither()   the 8-bit banding fix on the dark gradients
+//
+// His too: the composition (curtains over a starfield, meteors, a crescent
+// moon, a forested ridge standing on water that mirrors the sky), the layering
+// order, and the choice to pass the palette as six vec4 uniforms rather than a
+// const array — which is also why none of the additions below may introduce one.
+//
+// Added since: a touch field the light is sampled through, a real sun and moon
+// on the day's true sunrise and sunset, a horizon fitted to measured elevation,
+// water detected rather than assumed, snow above the freezing level, and
+// weather. All of it built around his aurora, none of it replacing it.
 #version 440
 
 layout(location = 0) in vec2 qt_TexCoord0;   // y = 0 at top

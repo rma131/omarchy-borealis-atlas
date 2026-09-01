@@ -7,8 +7,11 @@
 // finger drags time through 23 days of it; the shader does no lookups and holds
 // no arrays, because the GLSL 120 target it compiles to rejects them.
 //
-// The aurora scene it grew out of is marko-builds/borealis (MIT), and is still
-// descended from it — see LICENSE and the credits in README.md.
+// CREDIT. This is a derivative of marko-builds/borealis (MIT) by Marko
+// Stankovic, and far more of it is his than the size of this file suggests:
+// 87 of the 92 substantive lines of his Borealis.qml are still here verbatim,
+// including the whole palette table below — all five palettes are his colours,
+// digit for digit. See LICENSE and the Credits section of README.md.
 //
 // Dismiss rule: a quick tap dismisses (this is still something you park on a
 // screen and must stay trivial to get out of, especially in tablet mode where
@@ -39,7 +42,11 @@ Item {
   // ~/.config/omarchy/shell.json, applied live on save (shellConfig is
   // reactive):  "plugins": [{ "id": "io.github.rma131.borealis-atlas",
   // "palette": "ember" }]  — aurora | ember | gold | nord | ice.
-  // 6-stop ramps + sky tints from play/aurora.py PALETTES (0-255).
+  // These five palettes are Marko Stankovic's, carried over from Borealis
+  // unchanged — the stop positions, the six RGB triplets each, and the sky base
+  // and amplitude tints, digit for digit. He ported them from his own
+  // play/aurora.py PALETTES (0-255). They are the reason this looks the way it
+  // does; do not "improve" them without saying so.
   readonly property var paletteTable: ({
     aurora: { p: [0.00, 0.12, 0.30, 0.55, 0.80, 1.00],
       c: [[150,45,180],[90,110,205],[35,200,200],[30,235,130],[25,180,80],[8,70,35]],

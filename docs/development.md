@@ -1,5 +1,12 @@
 # Developing Borealis Atlas
 
+Before changing anything in `shaders/aurora.frag` or the palette table in
+`BorealisAtlas.qml`, know which parts are Marko Stankovic's from
+[Borealis](https://github.com/marko-builds/borealis) — six shader functions and
+all five palettes, carried here unchanged. They are marked in the headers of
+both files and accounted for in the [Credits](../README.md#credits). Improving
+them is allowed; doing it silently is not.
+
 Notes for changing the plugin, not for using it. For that, see
 [the README](../README.md); for why the scene works the way it does, see
 [design.md](design.md).

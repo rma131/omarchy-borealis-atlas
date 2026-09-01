@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "rma131",
   "license": "MIT",
-  "description": "A touchscreen sky and weather explorer: real forecast, measured horizon, and 23 days you can scrub with a finger.",
+  "description": "A touchscreen sky and weather explorer built on marko-builds/borealis: real forecast, measured horizon, and 23 days you can scrub with a finger.",
   "kinds": [
     "overlay"
   ],

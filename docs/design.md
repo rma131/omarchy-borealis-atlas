@@ -5,9 +5,17 @@ was arrived at by measuring rather than guessing, and the measurements are the
 part worth keeping. For what the plugin *is* and how to install it, see
 [the README](../README.md).
 
-The scene began as [marko-builds/borealis](https://github.com/marko-builds/borealis)
-(MIT), and the first section below is what changed first: making a finger
-something the aurora reacts to rather than something that closes it.
+**The scene is [marko-builds/borealis](https://github.com/marko-builds/borealis)
+(MIT), by Marko Stankovic, with a great deal built around it.** Read that
+sentence literally: `curtain()`, `ramp()`, `vnoise()`, `hash21()`, `dither()`
+and `meteors()` are his, unchanged, and so are all five palettes. Everything
+described below is an addition to a scene that was already beautiful, and where
+a section says "the aurora" or "the palette" it is describing his work, not
+ours. The full accounting, with line counts measured against his source, is in
+the [Credits](../README.md#credits).
+
+The first section is simply what changed first: making a finger something the
+aurora reacts to rather than something that closes it.
 
 ## The finger is a repulsor, not a lamp
 

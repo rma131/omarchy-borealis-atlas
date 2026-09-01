@@ -1,21 +1,29 @@
 # Borealis Atlas
 
-A touchscreen sky and weather explorer for [Omarchy](https://omarchy.org).
-Summon it and you get the sky where you actually are: today's forecast, the sun
-rising and setting when it really does, the horizon measured from the terrain
-around you, snow lying above the freezing level, and the aurora at whatever the
-solar wind is doing tonight. Drag a finger across the screen and time moves —
-seven days back, sixteen forward.
+**This starts with [Borealis](https://github.com/marko-builds/borealis), by
+Marko Stankovic.** It is a beautiful piece of work — a summoned fullscreen
+aurora, entirely procedural, one fragment shader and not a single image asset,
+with a colour sense that is the whole reason any of this looks the way it does.
+We loved it, installed it, and then kept wanting to ask it questions: what is
+the weather doing, when does the sun actually rise here, what does the horizon
+look like where I am.
 
-It is 100% procedural. One fragment shader, no image assets.
+Borealis Atlas is what came of asking. It is a touchscreen sky and weather
+explorer built on his aurora: today's real forecast, the sun rising and setting
+when it really does, the horizon measured from the terrain around you, snow
+lying above the freezing level, and the aurora at whatever the solar wind is
+doing tonight. Drag a finger across the screen and time moves — seven days
+back, sixteen forward.
+
+Still 100% procedural. Still one fragment shader, still no image assets. That
+was his idea and it is worth keeping.
 
 ![Reykjavik at night — aurora over the sea, with the moon at its real phase](docs/media/reykjavik-aurora.jpg)
 
-> The aurora scene began as a fork of
-> [marko-builds/borealis](https://github.com/marko-builds/borealis) (MIT) and is
-> still descended from it — the curtains, the starfield, the meteors and the
-> water are its design. What grew around it is new: a finger the light reacts
-> to, real weather, a measured horizon, and the 23-day scrub.
+> **The aurora is his.** `curtain()`, `ramp()`, `vnoise()`, `hash21()`,
+> `dither()` and `meteors()` are unchanged from Borealis, and all five palettes
+> are his colours to the last digit. See [Credits](#credits) — it is worth
+> reading before you assume any of the prettiness here is ours.
 
 ## What it looks like
 
@@ -56,8 +64,10 @@ Same overlay, three different dates. The phase is arithmetic, not a picture.
 
 ![Moon phases: full, waning gibbous, last quarter](docs/media/moon-phases.jpg)
 
-### Five palettes
+### Five palettes, all of them his
 
+Every colour below was chosen by Marko Stankovic for Borealis and is carried
+here unchanged — the six-stop ramps and the sky tints, digit for digit.
 `aurora` by default; `ember`, `gold`, `nord` and `ice` are one key in
 `shell.json`, or a two-finger tap. Same place, same minute.
 
@@ -186,10 +196,50 @@ rebuilding the shader and clearing the QML cache.
 
 ## Credits
 
-[marko-builds/borealis](https://github.com/marko-builds/borealis) by Marko
-Stankovic, MIT — the aurora scene this grew out of, and still the shape of the
-sky, the water and the ridge. If you want the original, calm, non-interactive
-version, install that one.
+### Borealis, by Marko Stankovic
+
+[github.com/marko-builds/borealis](https://github.com/marko-builds/borealis) —
+MIT. This is not a project that was merely *inspired* by Borealis. It is built
+on it, and most of what makes it beautiful is still his work, unchanged.
+
+Measured against his source rather than asserted from memory:
+
+| | his | kept here verbatim |
+|---|---|---|
+| `Borealis.qml` substantive lines | 92 | **87** |
+| `aurora.frag` substantive lines | 171 | **118** |
+
+Specifically and entirely his:
+
+- **The aurora itself.** `curtain()` — the function that draws the curtains —
+  is byte-for-byte his, as are `ramp()` (the six-stop colour interpolation),
+  `hash21()`, `dither()`, `vnoise()` and `meteors()`. Six functions, not one
+  character changed.
+- **All five palettes.** `aurora`, `ember`, `gold`, `nord`, `ice` — the stop
+  positions, the six RGB triplets each, and the sky base and amplitude tints,
+  identical to his. He ported them from his own generative aurora engine. Every
+  colour in every screenshot in this README is his choice, including the
+  palette comparison strip above, which is a showcase of his work and not ours.
+- **The shape of the scene.** Curtains over a starfield, meteors, a crescent
+  moon, a forested ridge standing on water that mirrors the sky. The
+  composition, the layering order, and the decision to reflect the upper scene
+  through a stretched mirror are all his.
+- **The architecture.** One `qsb`-compiled fragment shader, zero assets, the
+  palette passed as six `vec4` uniforms rather than a const array, a layer-shell
+  overlay that is deliberately modal. We inherited all of it and it has held up
+  under roughly four times the amount of code.
+
+What is added here: a finger the light reacts to, real weather and a real sun,
+a horizon measured from elevation data, water found rather than assumed, snow
+above the freezing level, and a 23-day scrub. It is a lot of work, and it is
+all *around* his aurora rather than instead of it.
+
+**If you want the original** — calm, non-interactive, and lovely exactly as it
+is — install that one instead:
+
+```sh
+omarchy plugin add https://github.com/marko-builds/borealis.git --enable
+```
 
 ## Licence
 
