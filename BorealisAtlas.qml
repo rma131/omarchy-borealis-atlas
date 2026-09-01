@@ -1,15 +1,19 @@
-// BorealisTouch — a touch-reactive fork of marko-builds/borealis (MIT).
+// Borealis Atlas — a touchscreen sky and weather explorer.
 //
-// Two changes from upstream. The shader gained three touch slots (ripples that
-// ride the water's reflection UV, and an in-palette bloom under a finger), and
-// the dismiss rule was split so the screen can be played with at all: upstream
-// dismissed on *any* press, which on a touchscreen meant the first finger-down
-// closed the overlay before anything could react.
+// The scene is driven by real data, resolved here and handed to the shader as a
+// handful of vec4s: the forecast where you are, the sun rising and setting when
+// it really does, the horizon measured from elevation samples taken around you,
+// water found rather than assumed, and snow lying above the freezing level. A
+// finger drags time through 23 days of it; the shader does no lookups and holds
+// no arrays, because the GLSL 120 target it compiles to rejects them.
 //
-// Dismiss rule: a quick tap dismisses (a screensaver must stay trivial to get
-// out of, especially in tablet mode where there is no keyboard); press-and-hold
-// past HOLD_MS, or any drag past DRAG_PX, is treated as intent to interact and
-// will not dismiss. Any key still dismisses.
+// The aurora scene it grew out of is marko-builds/borealis (MIT), and is still
+// descended from it — see LICENSE and the credits in README.md.
+//
+// Dismiss rule: a quick tap dismisses (this is still something you park on a
+// screen and must stay trivial to get out of, especially in tablet mode where
+// there is no keyboard); press-and-hold past HOLD_MS, or any drag past
+// DRAG_PX, is intent to interact and will not dismiss. Any key still dismisses.
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -22,9 +26,18 @@ Item {
   property var manifest: null
   property bool opened: false
 
+  // The id this plugin was actually installed under. The shell hands every
+  // plugin its own manifest, so this is knowable rather than assumed — and it
+  // has to be, because the id doubles as the key for the plugin's own entry in
+  // shell.json. Hard-coding it meant that installing under any other id left
+  // every setting silently dead: no error, no warning, just a scene that
+  // ignored your location and your palette. The literal is only a fallback for
+  // a direct load with no manifest injected.
+  readonly property string pluginId: (manifest && manifest.id) || "io.github.rma131.borealis-atlas"
+
   // The single config surface: "palette" on this plugin's entry in
   // ~/.config/omarchy/shell.json, applied live on save (shellConfig is
-  // reactive):  "plugins": [{ "id": "local.borealis-touch",
+  // reactive):  "plugins": [{ "id": "io.github.rma131.borealis-atlas",
   // "palette": "ember" }]  — aurora | ember | gold | nord | ice.
   // 6-stop ramps + sky tints from play/aurora.py PALETTES (0-255).
   readonly property var paletteTable: ({
@@ -56,7 +69,7 @@ Item {
       // undefined. Measured in the shipping Qt V4 engine as a TypeError on
       // every colour uniform.
       var name = e && e.palette !== undefined ? String(e.palette) : ""
-      if (e && e.id === "local.borealis-touch"
+      if (e && e.id === root.pluginId
           && Object.prototype.hasOwnProperty.call(paletteTable, name))
         return name
     }
@@ -274,7 +287,7 @@ Item {
     var plugins = (cfg && cfg.plugins) || []
     for (var i = 0; i < plugins.length; i++) {
       var e = plugins[i]
-      if (e && e.id === "local.borealis-touch" && e.auroraFloor !== undefined) {
+      if (e && e.id === root.pluginId && e.auroraFloor !== undefined) {
         var v = parseFloat(e.auroraFloor)
         if (!isNaN(v)) return Math.max(0, Math.min(1, v))
       }
@@ -306,14 +319,14 @@ Item {
   property real _lastPush: -9999
   // Location, in order of preference: explicit coordinates in shell.json, then
   // a place name there (geocoded once), then IP lookup. Set it per-plugin:
-  //   { "id": "local.borealis-touch", "location": "Reykjavik" }
-  //   { "id": "local.borealis-touch", "latitude": 64.15, "longitude": -21.94 }
+  //   { "id": "io.github.rma131.borealis-atlas", "location": "Reykjavik" }
+  //   { "id": "io.github.rma131.borealis-atlas", "latitude": 64.15, "longitude": -21.94 }
   readonly property var configLoc: {
     var cfg = root.shell && root.shell.shellConfig
     var plugins = (cfg && cfg.plugins) || []
     for (var i = 0; i < plugins.length; i++) {
       var e = plugins[i]
-      if (!e || e.id !== "local.borealis-touch") continue
+      if (!e || e.id !== root.pluginId) continue
       var la = parseFloat(e.latitude), lo = parseFloat(e.longitude)
       if (!isNaN(la) && !isNaN(lo))
         return { lat: la, lon: lo, name: String(e.location || "Custom") }
@@ -1142,7 +1155,7 @@ Item {
   function dismiss() {
     root.opened = false
     if (root.shell && typeof root.shell.hide === "function")
-      root.shell.hide((root.manifest && root.manifest.id) || "local.borealis-touch")
+      root.shell.hide(root.pluginId)
   }
 
   function toggle() {

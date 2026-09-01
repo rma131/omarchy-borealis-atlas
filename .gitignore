@@ -1,3 +1,5 @@
-# scratch captures
-*.png
+# Scratch captures from development. Screenshots that belong to the project
+# live in docs/media/ and are tracked; this only catches the ones left lying
+# around at the repo root by grim.
+/*.png
 *.bak

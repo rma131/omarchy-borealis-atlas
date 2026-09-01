@@ -1,15 +1,16 @@
 {
   "schemaVersion": 1,
-  "id": "local.borealis-touch",
-  "name": "Borealis Touch",
-  "version": "0.1.0",
-  "author": "Marko Stankovic (upstream), touch fork local",
-  "description": "Touch-reactive fork of Borealis — ripples and in-palette bloom under your fingers",
+  "id": "io.github.rma131.borealis-atlas",
+  "name": "Borealis Atlas",
+  "version": "1.0.0",
+  "author": "rma131",
+  "license": "MIT",
+  "description": "A touchscreen sky and weather explorer: real forecast, measured horizon, and 23 days you can scrub with a finger.",
   "kinds": [
     "overlay"
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "overlay": "BorealisTouch.qml"
+    "overlay": "BorealisAtlas.qml"
   }
 }

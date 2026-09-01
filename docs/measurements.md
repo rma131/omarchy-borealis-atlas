@@ -1,8 +1,12 @@
-# Borealis trial — measured results
+# Measured cost
+
+Numbers from the machine this was built on, kept because the power result is the
+one thing a reader should know before leaving this on a laptop screen. One
+machine, one GPU — see the caveat in [the README](../README.md#requirements).
 
 Machine: ThinkPad X1 Yoga 3rd Gen · i7-8650U · Intel UHD 620 (Gen9.5, 24 EU, 1150 MHz max)
 Display: 1920x1080@60 eDP, scale 1.25 (overlay is 1536x864 logical / 1920x1080 physical)
-Omarchy 4.0.1 Quattro · Hyprland/Wayland · battery 45.6 Wh @ 84% health
+Omarchy 4.0.1 Quattro · Hyprland/Wayland
 Measured 2026-08-27, **on battery**, 60 s sample windows.
 
 ## Numbers
@@ -61,7 +65,7 @@ it runs all the time.
 
 ## Touch fork — done
 
-Forked to a separate plugin, `local.borealis-touch`, so upstream stays pristine and
+Forked to a separate plugin, `io.github.rma131.borealis-atlas`, so upstream stays pristine and
 `omarchy plugin update`-able. Upstream is installed but **disabled**; the fork is enabled
 and `SUPER+ALT+B` points at it.
 
