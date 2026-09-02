@@ -451,6 +451,45 @@ Item {
     return a.length > n ? null : a       // too long is malformed, not truncatable
   }
 
+  // Counting the elements is not checking them. These values go on to reach
+  // arithmetic, Date construction, loop bounds and shader uniforms, and a
+  // string or a NaN in one slot of one series surfaces a long way from here —
+  // as a blank overlay, or a scrub that walks off the end of a day. So every
+  // element that is consumed is checked for type and for a plausible range,
+  // and a single bad one rejects the whole reply rather than being skipped:
+  // a series with a hole in it is not a series this scene can index.
+  function numArray(a, n, lo, hi, nullsOk) {
+    if (!Array.isArray(a) || a.length > n) return null
+    for (var i = 0; i < a.length; i++) {
+      var v = a[i]
+      if (v === null || v === undefined) { if (nullsOk) continue; return null }
+      if (typeof v !== "number" || !isFinite(v) || v < lo || v > hi) return null
+    }
+    return a
+  }
+
+  function strArray(a, n, maxLen) {
+    if (!Array.isArray(a) || a.length > n) return null
+    for (var i = 0; i < a.length; i++) {
+      var v = a[i]
+      if (typeof v !== "string" || v.length > maxLen) return null
+    }
+    return a
+  }
+
+  // A location is two coordinates and two names, and it is used to build
+  // request URLs, so it is canonicalised rather than trusted wherever it comes
+  // from — the IP lookup, the geocoder, or a cache file on disk.
+  function validLoc(o) {
+    if (!o || typeof o !== "object") return null
+    var la = root.finiteIn(o.lat !== undefined ? o.lat : o.latitude, -90, 90)
+    var lo = root.finiteIn(o.lon !== undefined ? o.lon : o.longitude, -180, 180)
+    if (la === null || lo === null) return null
+    return { lat: la, lon: lo,
+             name: root.capStr(o.name, root.maxStrLen),
+             country: root.capStr(o.country, root.maxStrLen) }
+  }
+
   property var loc: null      // { lat, lon, name, country }
   property real elevation: 0
   property var ring: null     // { spread (m across ~50 km), sea (0..1) }
@@ -1135,26 +1174,45 @@ Item {
     cacheWriteProc.running = true
   }
 
+  // Written the careful way, because the path is known and another process
+  // running as you can sit on it. Ordinary redirection to a predictable
+  // `.tmp.$$` can be pre-created as a symlink, and checking the destination by
+  // pathname and then renaming by pathname leaves a window in which the parent
+  // components can be swapped between the two.
+  //
+  // So: the directory is verified once and then made the working directory, and
+  // every subsequent operation uses a bare filename resolved against it rather
+  // than a path that can be re-pointed underneath us. The temporary is created
+  // by mktemp, which is exclusive-create with an unpredictable name, so it
+  // cannot be pre-planted. A trap removes it on any exit, and only a rename
+  // within that one verified directory publishes the result.
   readonly property string cacheWriteScript:
       "set -eu\n"
     + "f=$1\n"
+    + "n=$2\n"
     + "d=${f%/*}\n"
+    + "b=${f##*/}\n"
     + "umask 077\n"
     + "mkdir -p \"$d\"\n"
+    + "if [ -L \"$d\" ]; then exit 1; fi\n"
+    + "if [ ! -d \"$d\" ]; then exit 1; fi\n"
     + "chmod 700 \"$d\" 2>/dev/null || true\n"
-    + "if [ -L \"$f\" ]; then exit 1; fi\n"
-    + "if [ -e \"$f\" ] && [ ! -f \"$f\" ]; then exit 1; fi\n"
-    + "t=$d/.borealis-sky.tmp.$$\n"
+    + "cd \"$d\" || exit 1\n"
+    + "if [ -L \"$b\" ]; then exit 1; fi\n"
+    + "if [ -e \"$b\" ] && [ ! -f \"$b\" ]; then exit 1; fi\n"
+    + "t=$(mktemp \"./.${b}.XXXXXXXX\") || exit 1\n"
+    + "trap 'rm -f \"$t\"' EXIT INT TERM HUP\n"
     // Exactly $2 bytes are read and no more. Waiting for EOF instead hangs:
     // closing the write end of stdin is not something this side can rely on,
     // and a base64 blocked on a pipe that never closes leaves the temporary
     // orphaned and queues every later save behind it forever. An exact count
     // is also a bound in itself — the reader cannot be made to consume more
     // than the writer declared.
-    + "head -c \"$2\" | base64 -d > \"$t\"\n"
+    + "head -c \"$n\" | base64 -d > \"$t\"\n"
     + "chmod 600 \"$t\"\n"
     + "sync -d \"$t\" 2>/dev/null || sync\n"
-    + "mv -f \"$t\" \"$f\"\n"
+    + "mv -f \"$t\" \"$b\"\n"
+    + "trap - EXIT INT TERM HUP\n"
 
   // The cache is written by this plugin, but it is a file on disk at a known
   // path: it is treated as untrusted input, bounded before it is parsed and
@@ -1197,7 +1255,11 @@ Item {
           && String(c.loc.name).toLowerCase() !== want.name.toLowerCase()) {
         refreshSky(true); return
       }
-      if (c.chosen && !root.configLoc) root.chosenLoc = c.chosen
+      // `chosen` is not decoration: a later refresh installs it over the
+      // sanitised location, after which its fields build request URLs and are
+      // handed to numeric methods. It gets the same canonicalisation, and is
+      // dropped rather than kept if it fails.
+      if (c.chosen && !root.configLoc) root.chosenLoc = root.validLoc(c.chosen)
       loc = c.loc
       // Series are re-checked exactly as they are on arrival from the network,
       // because a file can be edited and a cached fc feeds the same indexing.
@@ -1396,7 +1458,7 @@ Item {
       onStreamFinished: {
         try {
           var ej = root.boundedParse(text, root.capElevation)
-          var e = ej && root.capArray(ej.elevation, root.maxPoints)
+          var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
           var want = root.nearN * root.nearN
           if (!e || e.length < want) { root.fallbackFan(); return }
 
@@ -1489,7 +1551,7 @@ Item {
       onStreamFinished: {
         try {
           var ej = root.boundedParse(text, root.capElevation)
-          var e = ej && root.capArray(ej.elevation, root.maxPoints)
+          var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
           var want = root.hzFanAz * (root.hzRingsUsed || root.hzFan).length
           if (!e || e.length < want) return
           var h0 = root.hzH0
@@ -1586,22 +1648,37 @@ Item {
           // longer one: resolveSky() reads these arrays in parallel at one
           // index, so a short series next to a long axis is an out-of-bounds
           // read waiting for a scrub to reach it.
-          var t = root.capArray(h.time, root.maxSeries)
+          var t = root.strArray(h.time, root.maxSeries, 40)
           if (!t || t.length < 2) return
-          var series = function (a) {
-            var v = root.capArray(a, root.maxSeries)
+          // Ranges are what these quantities can physically be, not what the
+          // service happens to send: a reply outside them is wrong whoever
+          // produced it. Nulls are tolerated only where the API really does
+          // send them for a valid reason.
+          var series = function (a, lo, hi, nullsOk) {
+            var v = root.numArray(a, root.maxSeries, lo, hi, nullsOk)
             return (v && v.length === t.length) ? v : null
           }
-          var code  = series(h.weather_code),  precip = series(h.precipitation)
-          var cloud = series(h.cloud_cover),   temp   = series(h.temperature_2m)
-          var snowf = series(h.snowfall),      depth  = series(h.snow_depth)
-          var soil  = series(h.soil_temperature_0cm)
-          var wspd  = series(h.wind_speed_10m), wdir  = series(h.wind_direction_10m)
+          // Nulls are real here: the tail of the 23-day window comes back
+          // with them, and kindWeights() already treats an unknown code as
+          // clear. Rejecting them threw the whole forecast away.
+          var code  = series(h.weather_code, 0, 99, true)
+          var precip= series(h.precipitation, 0, 1000, true)
+          var cloud = series(h.cloud_cover, 0, 100, true)
+          var temp  = series(h.temperature_2m, -120, 80, true)
+          var snowf = series(h.snowfall, 0, 500, true)
+          var depth = series(h.snow_depth, 0, 100, true)
+          var soil  = series(h.soil_temperature_0cm, -120, 100, true)
+          var wspd  = series(h.wind_speed_10m, 0, 500, true)
+          var wdir  = series(h.wind_direction_10m, 0, 360, true)
           if (!code || !precip || !cloud || !temp || !snowf || !depth
               || !soil || !wspd || !wdir) return
-          // Optional: absent at some locations, so a null is expected, but a
-          // present-and-wrong-length one is not.
-          var flz = h.freezing_level_height === undefined ? null : series(h.freezing_level_height)
+          // Absent at some locations — Tromso sends nulls throughout — so a
+          // missing series is expected, but a present-and-malformed one is not.
+          var flz = null
+          if (h.freezing_level_height !== undefined) {
+            flz = series(h.freezing_level_height, -1000, 30000, true)
+            if (!flz) return
+          }
 
           root.elevation = root.finiteIn(j.elevation, -500, 9000) || 0
           var sr = root.parseDaylight(j.daily)
@@ -1629,10 +1706,21 @@ Item {
         try {
           var arr = root.capArray(root.boundedParse(text, root.capKp), root.maxDaily)
           if (!arr) return
+          // Rows are objects — { time_tag, kp, ... } — and only those carrying
+          // a kp are consumed, so a row without one is skipped rather than
+          // rejected. A row that does carry one must have a usable timestamp
+          // and an index in the range the scale actually has.
+          for (var q = 0; q < arr.length; q++) {
+            var row = arr[q]
+            if (!row || typeof row !== "object" || Array.isArray(row)) return
+            if (row.kp === undefined || row.kp === null) continue
+            if (typeof row.time_tag !== "string" || row.time_tag.length > 40) return
+            if (root.finiteIn(row.kp, 0, 9) === null) return
+          }
           var hrs = [], vals = []
           for (var i = 0; i < arr.length; i++) {
             var e = arr[i]
-            if (!e || e.kp === undefined) continue
+            if (!e || e.kp === undefined || e.kp === null) continue
             hrs.push(root.hoursFromMidnightUtc(e.time_tag))
             vals.push(parseFloat(e.kp))
           }
@@ -1652,8 +1740,8 @@ Item {
           var cj = root.boundedParse(text, root.capClimate)
           var d = cj && cj.daily
           if (!d) return
-          var dp = root.capArray(d.precipitation_sum, root.maxDaily)
-          var de = root.capArray(d.et0_fao_evapotranspiration, root.maxDaily)
+          var dp = root.numArray(d.precipitation_sum, root.maxDaily, 0, 5000, true)
+          var de = root.numArray(d.et0_fao_evapotranspiration, root.maxDaily, 0, 200, true)
           // Read in parallel at one index, so unequal lengths are refused
           // rather than walked off the end of the shorter one.
           if (!dp || !de || dp.length !== de.length || !dp.length) return
@@ -1680,7 +1768,7 @@ Item {
       onStreamFinished: {
         try {
           var ej = root.boundedParse(text, root.capElevation)
-          var e = ej && root.capArray(ej.elevation, root.maxPoints)
+          var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
           var want = 1 + root.hzAz * root.hzRings.length
           if (!e || e.length < want) return
           var h0 = e[0]
@@ -1741,9 +1829,11 @@ Item {
           var gj = root.boundedParse(text, root.capGeocode)
           var gr = gj && root.capArray(gj.results, 32)
           if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.searchNote = "Nothing found" } return }
-          var r = gr[0]
-          var nl = { lat: r.latitude, lon: r.longitude, name: r.name,
-                     country: root.capStr(r.country, root.maxStrLen) }
+          var r = root.validLoc(gr[0])
+          if (!r) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.searchNote = "Nothing found" } return }
+          // validLoc has already canonicalised the coordinates and capped the
+          // strings, so this is the sanitised object, not the reply.
+          var nl = r
           // Forward geocoding hands back the name and country with the
           // coordinates, so a typed place needs no second lookup to be labelled.
           if (root.geoForSearch) {
