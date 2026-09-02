@@ -336,8 +336,8 @@ Item {
       if (!e || e.id !== root.pluginId) continue
       var la = parseFloat(e.latitude), lo = parseFloat(e.longitude)
       if (!isNaN(la) && !isNaN(lo))
-        return { lat: la, lon: lo, name: String(e.location || "Custom") }
-      if (e.location) return { name: String(e.location) }   // geocode it
+        return { lat: la, lon: lo, name: root.capStr(e.location || "Custom", root.maxStrLen) }
+      if (e.location) return { name: root.capStr(e.location, root.maxStrLen) }   // geocode it
     }
     return null
   }
@@ -384,6 +384,71 @@ Item {
     root.loc = null; root.ring = null; root.climate = null
     root.horizon = null; root.water = null; root.fc = null; root.kp = null
     refreshSky(true)
+  }
+
+  // ---- bounds -----------------------------------------------------------
+  // Every network read is bounded twice, because a TLS-valid endpoint — or an
+  // intermediary that terminates TLS — is not a trusted source of length.
+  // curl aborts the transfer itself once the cap is passed (exit 63, and it
+  // does so mid-stream, so a chunked reply of undeclared length is bounded
+  // too), and the collected text is checked again here before it can reach
+  // JSON.parse. Real replies measured at the time of writing: forecast 38 KB,
+  // wttr 40 KB, climate 8.6 KB, Kp 6.9 KB, elevation 614 B, geocode 389 B.
+  // The caps are an order of magnitude above those, so they bound an attack
+  // without being a limit the services can trip by growing normally.
+  readonly property int capForecast:  524288
+  readonly property int capClimate:   262144
+  readonly property int capWttr:      262144
+  readonly property int capKp:        131072
+  readonly property int capElevation:  65536
+  readonly property int capGeocode:    65536
+  readonly property int capIp:         32768
+
+  // Cardinalities. We ask for a 23-day hourly window (552 slots) and at most
+  // 100 elevation points, so anything beyond these is a malformed reply rather
+  // than a longer one, and is refused instead of iterated.
+  readonly property int maxSeries: 1200
+  readonly property int maxDaily:   400
+  readonly property int maxPoints:  128
+  readonly property int maxStrLen:  120
+
+  // `--proto =https` pins the scheme so a redirect or a rewritten URL cannot
+  // downgrade the transport; curl is never given -L, so it does not follow
+  // redirects at all.
+  function curlCmd(seconds, maxBytes, url) {
+    return ["curl", "-fsS", "--proto", "=https",
+            "--retry", "2", "--retry-delay", "2",
+            "--max-time", String(seconds),
+            "--max-filesize", String(maxBytes), url]
+  }
+
+  // A parse that cannot be made to consume memory or to hand back something
+  // shaped differently than expected. Overflow is a controlled failure: null,
+  // which every caller already treats as "no data".
+  function boundedParse(text, maxBytes) {
+    var s = String(text || "")
+    if (s.length === 0 || s.length > maxBytes) return null
+    try {
+      var v = JSON.parse(s)
+      return (v && typeof v === "object") ? v : null
+    } catch (e) { return null }
+  }
+
+  function capStr(v, n) {
+    var s = (v === null || v === undefined) ? "" : String(v)
+    return s.length > n ? s.substring(0, n) : s
+  }
+
+  // Rejects NaN and Infinity as well as out-of-range, so a reply cannot put a
+  // non-finite number into a uniform and blank the scene.
+  function finiteIn(v, lo, hi) {
+    var n = parseFloat(v)
+    return (isFinite(n) && n >= lo && n <= hi) ? n : null
+  }
+
+  function capArray(a, n) {
+    if (!Array.isArray(a)) return null
+    return a.length > n ? null : a       // too long is malformed, not truncatable
   }
 
   property var loc: null      // { lat, lon, name, country }
@@ -809,22 +874,22 @@ Item {
 
   function geocode(place) {
     if (geoProc.running) return
-    geoProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8",
+    geoProc.command = root.curlCmd(8, root.capGeocode,
       "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name="
-      + encodeURIComponent(place)]
+      + encodeURIComponent(place))
     geoProc.running = true
   }
 
   function fetchForecast() {
     if (!loc || fcProc.running) return
-    fcProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "10",
+    fcProc.command = root.curlCmd(10, root.capForecast,
       "https://api.open-meteo.com/v1/forecast"
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
       + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
       + ",snowfall,snow_depth,soil_temperature_0cm,wind_speed_10m,wind_direction_10m"
       + ",freezing_level_height"
       + "&daily=sunrise,sunset,daylight_duration"
-      + "&past_days=7&forecast_days=16&timezone=auto"]   // 16 is the API max
+      + "&past_days=7&forecast_days=16&timezone=auto")   // 16 is the API max
     fcProc.running = true
   }
 
@@ -845,11 +910,11 @@ Item {
       return d.getFullYear() + "-" + (m < 10 ? "0" : "") + m
                              + "-" + (dd < 10 ? "0" : "") + dd
     }
-    climProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "12",
+    climProc.command = root.curlCmd(12, root.capClimate,
       "https://archive-api.open-meteo.com/v1/archive?latitude=" + loc.lat
       + "&longitude=" + loc.lon
       + "&start_date=" + iso(start) + "&end_date=" + iso(end)
-      + "&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=auto"]
+      + "&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=auto")
     climProc.running = true
   }
 
@@ -923,7 +988,7 @@ Item {
         la.push(pt[0].toFixed(4)); lo.push(pt[1].toFixed(4))
       }
     }
-    elevProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", root.elevationUrl(la, lo)]
+    elevProc.command = root.curlCmd(8, root.capElevation, root.elevationUrl(la, lo))
     elevProc.running = true
   }
 
@@ -963,7 +1028,7 @@ Item {
     }
     root.hzAim = centreAz; root.hzVx = vx; root.hzVy = vy
     root.hzRingsUsed = rings
-    fanProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", root.elevationUrl(la, lo)]
+    fanProc.command = root.curlCmd(8, root.capElevation, root.elevationUrl(la, lo))
     fanProc.running = true
   }
 
@@ -1005,7 +1070,7 @@ Item {
         la.push(pt[0].toFixed(5)); lo.push(pt[1].toFixed(5))
       }
     }
-    nearProc.command = ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", root.elevationUrl(la, lo)]
+    nearProc.command = root.curlCmd(8, root.capElevation, root.elevationUrl(la, lo))
     nearProc.running = true
   }
 
@@ -1036,23 +1101,96 @@ Item {
     kpProc.running = true
   }
 
+  // The cache holds your location and 23 days of where you have been looking,
+  // so how it is written matters as much as what is in it.
+  //
+  // It used to go through argv, which is wrong twice over: /proc/PID/cmdline is
+  // world-readable, so any process on the machine could read the payload while
+  // the write ran, and a long payload runs into ARG_MAX. It also wrote straight
+  // over the destination, which follows a symlink planted at the known path,
+  // leaves the file truncated and half-written for a concurrent reader, and
+  // lets two saves interleave.
+  //
+  // Now the payload goes over stdin, the directory is created 0700 and the file
+  // 0600, a symlinked or non-regular destination is refused, and the data lands
+  // on a same-directory temporary that is flushed and then renamed — atomic on
+  // one filesystem, so a reader sees the old file or the new one, never a torn
+  // one.
+  property string _pendingCache: ""
   function saveCache() {
     if (!loc) return
     var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
                     ring: ring, elevation: elevation, climate: climate,
                     horizon: horizon, hzH0: hzH0, water: water,
                     chosen: chosenLoc }
-    // base64 through argv: no quoting or escaping can go wrong
-    cacheWriteProc.command = ["sh", "-c",
-      "mkdir -p \"$(dirname \"$1\")\"; printf %s \"$2\" | base64 -d > \"$1\"",
-      "sh", cachePath, Qt.btoa(JSON.stringify(payload))]
+    var b64 = Qt.btoa(JSON.stringify(payload))
+    if (b64.length > root.capCache) return   // never write what we would refuse to read
+    // Concurrent saves are coalesced rather than raced: a write already in
+    // flight keeps only the newest payload and runs again when it finishes.
+    if (cacheWriteProc.running) { root._pendingCache = b64; return }
+    root._pendingCache = ""
+    cacheWriteProc.payload = b64
+    cacheWriteProc.command = ["sh", "-c", root.cacheWriteScript, "sh", cachePath,
+                              String(b64.length)]
     cacheWriteProc.running = true
+  }
+
+  readonly property string cacheWriteScript:
+      "set -eu\n"
+    + "f=$1\n"
+    + "d=${f%/*}\n"
+    + "umask 077\n"
+    + "mkdir -p \"$d\"\n"
+    + "chmod 700 \"$d\" 2>/dev/null || true\n"
+    + "if [ -L \"$f\" ]; then exit 1; fi\n"
+    + "if [ -e \"$f\" ] && [ ! -f \"$f\" ]; then exit 1; fi\n"
+    + "t=$d/.borealis-sky.tmp.$$\n"
+    // Exactly $2 bytes are read and no more. Waiting for EOF instead hangs:
+    // closing the write end of stdin is not something this side can rely on,
+    // and a base64 blocked on a pipe that never closes leaves the temporary
+    // orphaned and queues every later save behind it forever. An exact count
+    // is also a bound in itself — the reader cannot be made to consume more
+    // than the writer declared.
+    + "head -c \"$2\" | base64 -d > \"$t\"\n"
+    + "chmod 600 \"$t\"\n"
+    + "sync -d \"$t\" 2>/dev/null || sync\n"
+    + "mv -f \"$t\" \"$f\"\n"
+
+  // The cache is written by this plugin, but it is a file on disk at a known
+  // path: it is treated as untrusted input, bounded before it is parsed and
+  // shape-checked after. A cache that fails any of this is simply no cache.
+  readonly property int capCache: 2097152
+
+  // One definition of "a usable forecast", so the cache cannot install a shape
+  // the network path would have refused.
+  function validFc(f) {
+    if (!f || typeof f !== "object") return null
+    var keys = ["code","precip","cloud","temp","snowfall","depth","soil","wspd","wdir"]
+    var n = -1
+    for (var i = 0; i < keys.length; i++) {
+      var a = root.capArray(f[keys[i]], root.maxSeries)
+      if (!a || a.length < 2) return null
+      if (n < 0) n = a.length
+      else if (a.length !== n) return null
+    }
+    if (f.flz !== null && f.flz !== undefined) {
+      var z = root.capArray(f.flz, root.maxSeries)
+      if (!z || z.length !== n) return null
+    }
+    if (root.finiteIn(f.t0, -100000, 100000) === null) return null
+    return f
   }
 
   function loadCache(txt) {
     try {
-      var c = JSON.parse(String(txt || ""))
-      if (!c || !c.loc) return
+      var c = root.boundedParse(txt, root.capCache)
+      if (!c || !c.loc || typeof c.loc !== "object") return
+      var clat = root.finiteIn(c.loc.lat, -90, 90)
+      var clon = root.finiteIn(c.loc.lon, -180, 180)
+      if (clat === null || clon === null) return
+      c.loc = { lat: clat, lon: clon,
+                name: root.capStr(c.loc.name, root.maxStrLen),
+                country: root.capStr(c.loc.country, root.maxStrLen) }
       // a cache for somewhere else is not a cache for here
       var want = root.configLoc
       if (want && want.name && c.loc.name
@@ -1060,12 +1198,26 @@ Item {
         refreshSky(true); return
       }
       if (c.chosen && !root.configLoc) root.chosenLoc = c.chosen
-      loc = c.loc; fc = c.fc || null; kp = c.kp || null
-      ring = c.ring || null; elevation = c.elevation || 0
-      climate = c.climate || null
-      horizon = c.horizon || null; hzH0 = c.hzH0 || 0
-      water = c.water || null
-      lastFetchMs = c.at || 0
+      loc = c.loc
+      // Series are re-checked exactly as they are on arrival from the network,
+      // because a file can be edited and a cached fc feeds the same indexing.
+      fc = root.validFc(c.fc)
+      kp = (c.kp && root.capArray(c.kp.hrs, root.maxDaily)
+                 && root.capArray(c.kp.vals, root.maxDaily)
+                 && c.kp.hrs.length === c.kp.vals.length) ? c.kp : null
+      ring = (c.ring && root.finiteIn(c.ring.spread, 0, 9000) !== null
+                     && root.finiteIn(c.ring.sea, 0, 1) !== null) ? c.ring : null
+      elevation = root.finiteIn(c.elevation, -500, 9000) || 0
+      climate = (c.climate && root.finiteIn(c.climate.ai, 0, 100) !== null) ? c.climate : null
+      horizon = (c.horizon && root.capArray(c.horizon.coef, 16)
+                           && c.horizon.coef.length === 12
+                           && root.finiteIn(c.horizon.maxAng, -90, 90) !== null
+                           && root.finiteIn(c.horizon.base, -500, 9000) !== null
+                           && root.finiteIn(c.horizon.span, 0, 9000) !== null) ? c.horizon : null
+      hzH0 = root.finiteIn(c.hzH0, -500, 9000) || 0
+      water = (c.water && root.finiteIn(c.water.kind, 0, 3) !== null
+                       && root.finiteIn(c.water.level, -500, 9000) !== null) ? c.water : null
+      lastFetchMs = root.finiteIn(c.at, 0, 4102444800000) || 0
       pushSky()
       if (!ring || !horizon || !water) fetchHorizon()
       if (!climate) fetchClimate()
@@ -1175,7 +1327,11 @@ Item {
   function adoptIpLocation(lat, lon, name, country) {
     if (root.lockedLoc) return
     if (!isFinite(lat) || !isFinite(lon)) return
-    var nl = { lat: lat, lon: lon, name: name || "", country: country || "" }
+    // Names come from an API and are rendered, so they are capped where they
+    // enter rather than where they are drawn.
+    var nl = { lat: lat, lon: lon,
+               name: root.capStr(name, root.maxStrLen),
+               country: root.capStr(country, root.maxStrLen) }
     // a fifth of a degree is roughly 20 km: far enough to be somewhere else
     var moved = !root.loc || Math.abs(nl.lat - root.loc.lat) > 0.2
                           || Math.abs(nl.lon - root.loc.lon) > 0.2
@@ -1195,13 +1351,14 @@ Item {
   // wttr.in stays as the fallback, so nothing new has to be reachable.
   Process {
     id: locProc
-    command: ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", "https://get.geojs.io/v1/ip/geo.json"]
+    command: root.curlCmd(8, root.capIp, "https://get.geojs.io/v1/ip/geo.json")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           if (root.lockedLoc) return
-          var j = JSON.parse(String(text || ""))
+          var j = root.boundedParse(text, root.capIp)
+          if (!j) return
           var lat = parseFloat(j.latitude), lon = parseFloat(j.longitude)
           if (!isFinite(lat) || !isFinite(lon)) throw new Error("no fix")
           root.adoptIpLocation(lat, lon, j.city, j.country)
@@ -1214,13 +1371,16 @@ Item {
 
   Process {
     id: locFallbackProc
-    command: ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8", "https://wttr.in/?format=j1"]
+    command: root.curlCmd(8, root.capWttr, "https://wttr.in/?format=j1")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           if (root.lockedLoc) return
-          var a = JSON.parse(String(text || "")).nearest_area[0]
+          var wj = root.boundedParse(text, root.capWttr)
+          var na = wj && root.capArray(wj.nearest_area, 8)
+          if (!na || !na.length) return
+          var a = na[0]
           root.adoptIpLocation(parseFloat(a.latitude), parseFloat(a.longitude),
                                a.areaName && a.areaName[0] && a.areaName[0].value,
                                a.country && a.country[0] && a.country[0].value)
@@ -1235,7 +1395,8 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var e = JSON.parse(String(text || "")).elevation
+          var ej = root.boundedParse(text, root.capElevation)
+          var e = ej && root.capArray(ej.elevation, root.maxPoints)
           var want = root.nearN * root.nearN
           if (!e || e.length < want) { root.fallbackFan(); return }
 
@@ -1327,7 +1488,8 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var e = JSON.parse(String(text || "")).elevation
+          var ej = root.boundedParse(text, root.capElevation)
+          var e = ej && root.capArray(ej.elevation, root.maxPoints)
           var want = root.hzFanAz * (root.hzRingsUsed || root.hzFan).length
           if (!e || e.length < want) return
           var h0 = root.hzH0
@@ -1414,17 +1576,42 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var j = JSON.parse(String(text || ""))
+          var j = root.boundedParse(text, root.capForecast)
+          if (!j) return
           var h = j.hourly
-          root.elevation = parseFloat(j.elevation) || 0
+          if (!h) return
+
+          // Every series is bounded and must be the same length as the time
+          // axis it is indexed by. Anything else is a malformed reply, not a
+          // longer one: resolveSky() reads these arrays in parallel at one
+          // index, so a short series next to a long axis is an out-of-bounds
+          // read waiting for a scrub to reach it.
+          var t = root.capArray(h.time, root.maxSeries)
+          if (!t || t.length < 2) return
+          var series = function (a) {
+            var v = root.capArray(a, root.maxSeries)
+            return (v && v.length === t.length) ? v : null
+          }
+          var code  = series(h.weather_code),  precip = series(h.precipitation)
+          var cloud = series(h.cloud_cover),   temp   = series(h.temperature_2m)
+          var snowf = series(h.snowfall),      depth  = series(h.snow_depth)
+          var soil  = series(h.soil_temperature_0cm)
+          var wspd  = series(h.wind_speed_10m), wdir  = series(h.wind_direction_10m)
+          if (!code || !precip || !cloud || !temp || !snowf || !depth
+              || !soil || !wspd || !wdir) return
+          // Optional: absent at some locations, so a null is expected, but a
+          // present-and-wrong-length one is not.
+          var flz = h.freezing_level_height === undefined ? null : series(h.freezing_level_height)
+
+          root.elevation = root.finiteIn(j.elevation, -500, 9000) || 0
           var sr = root.parseDaylight(j.daily)
-          root.fc = { t0: root.hoursFromMidnightLocal(h.time[0]),
-                      code: h.weather_code, precip: h.precipitation,
-                      cloud: h.cloud_cover, temp: h.temperature_2m,
-                      snowfall: h.snowfall, depth: h.snow_depth,
-                      soil: h.soil_temperature_0cm,
-                      wspd: h.wind_speed_10m, wdir: h.wind_direction_10m,
-                      flz: h.freezing_level_height || null,
+          root.fc = { t0: root.hoursFromMidnightLocal(t[0]),
+                      code: code, precip: precip,
+                      cloud: cloud, temp: temp,
+                      snowfall: snowf, depth: depth,
+                      soil: soil,
+                      wspd: wspd, wdir: wdir,
+                      flz: flz,
                       rise: sr.rise, set: sr.set }
           root.pushSky(); root.saveCache()
         } catch (e) {}
@@ -1434,13 +1621,14 @@ Item {
 
   Process {
     id: kpProc
-    command: ["curl", "-fsS", "--retry", "2", "--retry-delay", "2", "--max-time", "8",
-      "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"]
+    command: root.curlCmd(8, root.capKp,
+      "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json")
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var arr = JSON.parse(String(text || ""))
+          var arr = root.capArray(root.boundedParse(text, root.capKp), root.maxDaily)
+          if (!arr) return
           var hrs = [], vals = []
           for (var i = 0; i < arr.length; i++) {
             var e = arr[i]
@@ -1461,11 +1649,21 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var d = JSON.parse(String(text || "")).daily
+          var cj = root.boundedParse(text, root.capClimate)
+          var d = cj && cj.daily
+          if (!d) return
+          var dp = root.capArray(d.precipitation_sum, root.maxDaily)
+          var de = root.capArray(d.et0_fao_evapotranspiration, root.maxDaily)
+          // Read in parallel at one index, so unequal lengths are refused
+          // rather than walked off the end of the shorter one.
+          if (!dp || !de || dp.length !== de.length || !dp.length) return
+          // Iterated over the validated length, not over d.time: the two
+          // series have been checked against each other, and the time axis is
+          // not read here at all.
           var ps = 0, es = 0
-          for (var i = 0; i < d.time.length; i++) {
-            ps += d.precipitation_sum[i] || 0
-            es += d.et0_fao_evapotranspiration[i] || 0
+          for (var i = 0; i < dp.length; i++) {
+            ps += dp[i] || 0
+            es += de[i] || 0
           }
           if (es <= 0) return
           root.climate = { ai: ps / es }
@@ -1481,7 +1679,8 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var e = JSON.parse(String(text || "")).elevation
+          var ej = root.boundedParse(text, root.capElevation)
+          var e = ej && root.capArray(ej.elevation, root.maxPoints)
           var want = 1 + root.hzAz * root.hzRings.length
           if (!e || e.length < want) return
           var h0 = e[0]
@@ -1539,9 +1738,12 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var r = JSON.parse(String(text || "")).results[0]
+          var gj = root.boundedParse(text, root.capGeocode)
+          var gr = gj && root.capArray(gj.results, 32)
+          if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.searchNote = "Nothing found" } return }
+          var r = gr[0]
           var nl = { lat: r.latitude, lon: r.longitude, name: r.name,
-                     country: r.country || "" }
+                     country: root.capStr(r.country, root.maxStrLen) }
           // Forward geocoding hands back the name and country with the
           // coordinates, so a typed place needs no second lookup to be labelled.
           if (root.geoForSearch) {
@@ -1566,7 +1768,34 @@ Item {
     }
   }
 
-  Process { id: cacheWriteProc }
+  // The payload reaches the script on stdin, never on the command line.
+  // Closing stdin is what signals EOF to base64, so the write only completes
+  // once the data has been handed over in full.
+  Process {
+    id: cacheWriteProc
+    property string payload: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload)
+      payload = ""
+    }
+    onExited: function (code, status) {
+      if (code !== 0)
+        console.warn("borealis-atlas: could not write the sky cache (exit "
+                     + code + "); the scene is unaffected")
+      // A save that arrived while this one was in flight runs now, with only
+      // the newest payload.
+      if (root._pendingCache.length > 0) {
+        var next = root._pendingCache
+        root._pendingCache = ""
+        payload = next
+        stdinEnabled = true
+        command = ["sh", "-c", root.cacheWriteScript, "sh", root.cachePath,
+                   String(next.length)]
+        running = true
+      }
+    }
+  }
 
   FileView {
     path: root.cachePath
@@ -1848,6 +2077,10 @@ Item {
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
     Text {
+      // Anything rendered here can carry API- or user-supplied text, and AutoText would
+      // interpret it as markup. Set on every Text without exception, so the rule is
+      // checkable by grep rather than by reading each binding.
+      textFormat: Text.PlainText
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       color: "#eaf0f8"
@@ -1860,6 +2093,10 @@ Item {
 
     // the day being explored, quieter than the line above it
     Text {
+      // Anything rendered here can carry API- or user-supplied text, and AutoText would
+      // interpret it as markup. Set on every Text without exception, so the rule is
+      // checkable by grep rather than by reading each binding.
+      textFormat: Text.PlainText
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       color: "#eaf0f8"
@@ -1979,6 +2216,10 @@ Item {
         spacing: root.sceneH * 0.018
 
         Text {
+          // Anything rendered here can carry API- or user-supplied text, and AutoText would
+          // interpret it as markup. Set on every Text without exception, so the rule is
+          // checkable by grep rather than by reading each binding.
+          textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
           color: "#eaf0f8"; opacity: 0.55
           font.pixelSize: Math.max(11, root.sceneH * 0.0165)
@@ -1995,6 +2236,10 @@ Item {
           border.color: "#2a4460"; border.width: 1
 
           Text {
+            // Anything rendered here can carry API- or user-supplied text, and AutoText would
+            // interpret it as markup. Set on every Text without exception, so the rule is
+            // checkable by grep rather than by reading each binding.
+            textFormat: Text.PlainText
             id: entry
             anchors.centerIn: parent
             color: "#eaf0f8"
@@ -2010,6 +2255,10 @@ Item {
         }
 
         Text {
+          // Anything rendered here can carry API- or user-supplied text, and AutoText would
+          // interpret it as markup. Set on every Text without exception, so the rule is
+          // checkable by grep rather than by reading each binding.
+          textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
           color: root.searchNote === "No such place" ? "#e8a37c" : "#eaf0f8"
           opacity: 0.62

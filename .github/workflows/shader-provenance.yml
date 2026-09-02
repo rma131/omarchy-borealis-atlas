@@ -27,10 +27,17 @@ permissions: {}
 jobs:
   reproduce:
     name: Rebuild the shader and prove it matches
-    runs-on: ubuntu-latest
+    # Every input to the attested build is pinned. The runner label is fixed
+    # rather than `-latest`, the container is addressed by manifest digest
+    # rather than by a moving tag, and both actions are pinned to a commit SHA
+    # rather than a tag that can be repointed. Update these deliberately, and
+    # note that `actions/attest-build-provenance` publishes an *annotated* tag,
+    # so its v4 ref resolves to a tag object — the SHA below is the commit that
+    # tag dereferences to, which is what Actions requires.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     container:
-      image: archlinux:base
+      image: archlinux:base@sha256:4bf33b21a715aac0b48ce6e9eaed4782a898eae96f88f5da3635572129c2584a
     permissions:
       contents: read
       id-token: write
@@ -61,7 +68,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Rebuild from source and compare digests
         run: |
@@ -96,6 +103,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Attest the artifact
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: shaders/aurora.frag.qsb

@@ -184,6 +184,23 @@ It writes exactly one file, `~/.local/state/omarchy/borealis-sky.json`, holding
 the last answers so the overlay opens instantly and still works offline. It
 never edits `shell.json` or any other configuration.
 
+**None of those services is treated as trusted.** A TLS-valid endpoint, or an
+intermediary that terminates TLS, is not a trustworthy source of length or
+shape, so every reply is bounded twice — `curl` aborts the transfer once a
+per-endpoint byte cap is passed, and the collected text is checked again before
+it can reach `JSON.parse`. Arrays must be within a known cardinality and the
+same length as the axis they are indexed by, numbers must be finite and in
+range, and strings are capped where they enter. Every `Text` in the overlay is
+`Text.PlainText`, without exception, so nothing an API returns can be
+interpreted as markup.
+
+The cache is written the careful way: the payload goes over stdin rather than
+argv (`/proc/*/cmdline` is world-readable), into a 0700 directory as a 0600
+file, refusing a symlinked or non-regular destination, via a same-directory
+temporary that is flushed and then atomically renamed. It is read back as
+untrusted input — bounded, shape-checked, and discarded rather than trusted if
+either fails.
+
 Weather, climate, elevation and geocoding come from
 [Open-Meteo](https://open-meteo.com) (CC BY 4.0), built on
 [ECMWF](https://www.ecmwf.int) and other national services; elevation is the
