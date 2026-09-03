@@ -18,9 +18,11 @@
 // const array — which is also why none of the additions below may introduce one.
 //
 // Added since: a touch field the light is sampled through, a real sun and moon
-// on the day's true sunrise and sunset, a horizon fitted to measured elevation,
-// water detected rather than assumed, snow above the freezing level, and
-// weather. All of it built around his aurora, none of it replacing it.
+// on the day's true sunrise and sunset and at the same half-degree size, so one
+// can eclipse the other; a horizon fitted to measured elevation, water detected
+// rather than assumed, snow above the freezing level, and weather that knows
+// the difference between rain and a storm. All of it built around his aurora,
+// none of it replacing it.
 #version 440
 
 layout(location = 0) in vec2 qt_TexCoord0;   // y = 0 at top
@@ -87,6 +89,20 @@ layout(std140, binding = 0) uniform buf {
     // whole foreground — so the one number that carries the difference is how
     // far toward you it comes. At the waterline exactly, there is none.
     vec4 shore;   // x near bank in uv, y wave scale, z mirror compression, w spare
+    // A solar eclipse is two discs of the same apparent size meeting, so what
+    // matters is where the moon is *relative to the sun*, at the true angular
+    // scale the discs are drawn at rather than the stylised scale the rest of
+    // this sky uses. The rest of the sky compresses a whole month across a
+    // screen width; at that scale the two discs would sit on each other for
+    // three days instead of two hours. z fades the override in as conjunction
+    // approaches, and away from it the moon keeps its ordinary place on the
+    // day's arc and z is zero, which is also what forbids a false eclipse.
+    vec4 ecl;     // x,y offset from the sun in sun-radii, z blend, w moon/sun radius
+    // The other kind of eclipse: the moon inside the earth's own shadow.
+    vec4 umbra;   // x shadow depth, y inspect zoom, z spare, w spare
+    // How violent the weather is, as against merely how wet. A thunderstorm is
+    // a state of the atmosphere, not a code — see resolveSky().
+    vec4 sev;     // x convective instability, y warning tier, z spare, w spare
 };
 
 // The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every
@@ -128,6 +144,14 @@ const float RIDGE_BASE = 0.18;
 const float WATERLINE = 0.82;
 const float HORIZON  = 0.795;   // where sun and moon cross
 const float SUN_ARC  = 0.62;    // how high the sun climbs at noon
+// The sun and the moon are both very close to half a degree wide, which is the
+// coincidence the whole idea of an eclipse rests on — so they are drawn the
+// same size here. The moon used to be nearly twice the sun, which made the two
+// bodies read as different kinds of object and made an occultation impossible.
+// This is also the unit QML measures the moon's offset from the sun in: one
+// DISC_R is one solar radius, so the shader owns the scale and QML sends pure
+// angle. Enlarged from the true half degree like everything else in this sky.
+const float DISC_R = 0.040;
 
 // piecewise-linear ramp, aurora.py ramp()/np.interp — chained clamped mixes
 // reproduce the 6-stop interp exactly (each clamp saturates before the next
@@ -400,17 +424,50 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   float lunar     = astro.x;
   float moonDay   = solarPhase(fract(td - lunar));
   float moonAlt   = solarAlt(fract(td - lunar));
-  vec2  moonUV    = vec2(mix(0.10, 0.90, clamp(moonDay, 0.0, 1.0)),
+  vec2  moonArc   = vec2(mix(0.10, 0.90, clamp(moonDay, 0.0, 1.0)),
                          HORIZON - moonAlt * SUN_ARC);
+  // Near conjunction the moon is placed off the sun at true angular scale
+  // instead, which is what makes the crossing take a couple of hours rather
+  // than a couple of days. ecl.z is zero everywhere else.
+  vec2  moonOff   = vec2(ecl.x / aspect, ecl.y) * DISC_R;
+  vec2  moonUV    = mix(moonArc, sunUV + moonOff, clamp(ecl.z, 0.0, 1.0));
 
-  float day   = smoothstep(-0.04, 0.32, sunAlt);        // 1 in full daylight
+  // Same size, so one can hide the other; the moon's own distance decides
+  // which way. Its apparent radius swings about six per cent either side of
+  // the sun's over a month, and that is exactly what separates a total eclipse
+  // from an annular one that leaves a ring of sun showing all the way through.
+  float moonR = DISC_R * ecl.w;
+  float sunMoon = length((sunUV - moonUV) * vec2(aspect, 1.0));
+  // The gate is a threshold, not a fade: while the moon is being handed back
+  // to the day's arc its drawn position is a blend of two places and means
+  // nothing, and a blend of two places can land inside contact when neither
+  // endpoint does. A real eclipse arrives with ecl.z at exactly 1.
+  float cover = clamp(1.0 - sunMoon / (DISC_R + moonR), 0.0, 1.0)
+              * smoothstep(0.55, 0.95, ecl.z)
+              * smoothstep(-0.06, 0.02, sunAlt);
+  // An annular eclipse never goes dark: there is still a bright ring up there,
+  // and a ring of photosphere is millions of times brighter than the corona.
+  // It does dim — like a heavy overcast, eerily — but it is not night, and it
+  // shows no stars. So depth and totality are two numbers, not one.
+  float annular  = max(0.0, DISC_R - moonR) / DISC_R;
+  float totalness = 1.0 - smoothstep(0.004, 0.030, annular);
+  float eclTot   = smoothstep(0.55, 1.00, cover) * totalness;
+  float eclDim   = smoothstep(0.55, 1.00, cover) * mix(0.38, 1.00, totalness);
+
+  // The daylight goes out with the photosphere, which is the whole experience
+  // of a total eclipse: it is not a dimming, it is a night that arrives in a
+  // minute and leaves in a minute.
+  float day   = smoothstep(-0.04, 0.32, sunAlt) * (1.0 - 0.92 * eclDim);
   // Snow and ice are bright under a moon, so winter is lit by whatever light is
   // actually up. Keying it to `day` alone made winter disappear at night.
   float moonLit = smoothstep(-0.05, 0.15, solarAlt(fract(td - astro.x)))
-                * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5));
+                * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5))
+                * (1.0 - 0.88 * umbra.x);   // an eclipsed moon lights nothing
   float lit = max(day, moonLit * 0.60);
-  float gold  = exp(-sunAlt * sunAlt * 26.0);           // the golden-hour band
-  float night = 1.0 - smoothstep(-0.20, 0.04, sunAlt);  // 1 in full night
+  // Totality puts a sunset all the way round the horizon, because the light
+  // you are seeing is coming in from outside the shadow in every direction.
+  float gold  = max(exp(-sunAlt * sunAlt * 26.0), eclTot * 0.55);
+  float night = max(1.0 - smoothstep(-0.20, 0.04, sunAlt), eclTot * 0.72);
   vec3  sig   = paletteSig();
 
   // sky: night as shipped, warmed through the golden hour, opening out to day
@@ -474,7 +531,8 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   // a real moon is faintly there in daylight too, so the day fade is gentle
   float moonAmt = smoothstep(-0.06, 0.08, moonAlt) * (1.0 - day * 0.55);
   if (moonAmt > 0.0) {
-    float r  = 0.055 * (1.0 + astro.w * 0.40);   // perigee + event emphasis
+    // Its real size relative to the sun, plus the zoom inspect mode asks for.
+    float r  = moonR * (1.0 + umbra.y * 0.35);
     vec2  mp = (uv - moonUV) * vec2(aspect, 1.0);
     float d1 = length(mp);
     float disc = smoothstep(r, r - 0.0035, d1);
@@ -487,6 +545,11 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
                                  : smoothstep(-xt + 0.06, -xt - 0.06, q.x);
     float illum = (1.0 - c) * 0.5;
     vec3 moonCol = vec3(0.95, 0.93, 0.85);
+    // Inside the earth's shadow the only light still reaching it has been bent
+    // through the whole depth of our atmosphere, and the blue has been taken
+    // out of it on the way. That is why a totally eclipsed moon is copper and
+    // not simply gone.
+    moonCol = mix(moonCol, vec3(0.44, 0.12, 0.055), umbra.x);
     // Earthshine is a ghost, not a grey disc: the unlit limb stays mostly
     // transparent so the sky shows through, and it only reads at all once the
     // sky is dark.
@@ -496,7 +559,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     // white dot. Shading it like a sphere read as modelled, not minimal.
     float mar = vnoise(q * 2.1 + vec2(3.7, 1.9)) * 0.62
               + vnoise(q * 5.1 + vec2(8.1, 4.4)) * 0.38;
-    float face = 1.0 - 0.065 * smoothstep(0.46, 0.90, mar);
+    float face = (1.0 - 0.065 * smoothstep(0.46, 0.90, mar)) * (1.0 - 0.55 * umbra.x);
 
     float ashen = 0.04 + 0.11 * night;
     col = mix(col, moonCol * face, disc * moonAmt * (ashen + (1.0 - ashen) * sunlit));
@@ -526,8 +589,10 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     // instead of staying wispy, and it widens the band vertically. Without
     // this, 95% cover still rendered as a few streaks over a sunny sky.
     cd = smoothstep(mix(0.60, 0.16, cloudAmt), mix(0.92, 0.52, cloudAmt), cd);
-    float cTop = 0.16 - 0.12 * cloudAmt;
-    float cBot = 0.60 + 0.18 * cloudAmt;
+    // A storm deck hangs lower and reaches further down the sky than an
+    // overcast one; a severe cell drags a shelf almost onto the ridge.
+    float cTop = 0.16 - 0.12 * cloudAmt - 0.055 * sev.y;
+    float cBot = 0.60 + 0.18 * cloudAmt + 0.12 * sev.y;
     cd *= smoothstep(cTop, cTop + 0.18, uv.y)
         * (1.0 - smoothstep(cBot, cBot + 0.18, uv.y));
     if (cd > 0.0) {
@@ -538,6 +603,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
       vec3 shade0 = mix(vec3(0.20, 0.19, 0.32), vec3(0.55, 0.60, 0.70), day);
       // a storm deck is bruised, not bright
       shade0 = mix(shade0, shade0 * 0.30, wx.w);
+      shade0 = mix(shade0, shade0 * vec3(0.72, 0.66, 0.60), sev.y);   // green-black
       vec3 shade  = mix(shade0, shade0 * (0.45 + 0.95 * sig), PALETTE_TINT);
       // the deck is lit from above by the aurora, so overcast auroral nights
       // read as glowing cloud rather than a hidden aurora
@@ -549,7 +615,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   }
 
   // heavy weather kills the light
-  col *= 1.0 - 0.50 * wx.w - 0.22 * max(0.0, wx.x - 0.55);
+  col *= 1.0 - 0.50 * wx.w - 0.22 * max(0.0, wx.x - 0.55) - 0.24 * sev.y;
 
   // the sun itself, once it clears the horizon
   float sunAmt = smoothstep(-0.10, 0.01, sunAlt);
@@ -559,9 +625,55 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     vec3 sunCol = mix(vec3(1.00, 0.58, 0.30), vec3(1.00, 0.96, 0.88),
                       smoothstep(0.0, 0.45, sunAlt));
     sunCol = mix(sunCol, sunCol * (0.72 + 0.46 * sig), 0.15);
-    col += sunCol * exp(-sd *  9.0) * 0.30 * sunAmt;   // broad haze
-    col += sunCol * exp(-sd * 42.0) * 0.55 * sunAmt;   // tight halo
-    col = mix(col, vec3(1.0, 0.97, 0.90), smoothstep(0.030, 0.025, sd) * sunAmt);
+    // The glow belongs to the photosphere, so it goes out with it.
+    float open = 1.0 - 0.94 * cover;
+    col += sunCol * exp(-sd *  9.0) * 0.30 * sunAmt * open;   // broad haze
+    col += sunCol * exp(-sd * 42.0) * 0.55 * sunAmt * open;   // tight halo
+    // The disc is cut per pixel rather than dimmed as a whole, which is what
+    // gives the partial phases their crescent instead of a grey sun.
+    float bite = smoothstep(moonR - 0.0018, moonR,
+                            length((uv - moonUV) * vec2(aspect, 1.0)));
+    // The disc's own soft edge is narrower than it was, because in an annular
+    // eclipse the ring of sun left showing is only about three pixels wide and
+    // a wider edge simply swallowed it: the ring came out solid black.
+    col = mix(col, vec3(1.0, 0.97, 0.90),
+              smoothstep(DISC_R, DISC_R - 0.0016, sd) * sunAmt * bite);
+  }
+
+  // The moon itself, silhouetted. It is only ever a black disc when there is
+  // something behind it bright enough to make it one.
+  if (cover > 0.0) {
+    float md = length((uv - moonUV) * vec2(aspect, 1.0));
+    float sdm = length((uv - sunUV) * vec2(aspect, 1.0));
+    // The moon is dark only against something bright. Over open sky it is not
+    // there at all — which is why a partial eclipse looks like a bite taken out
+    // of the sun and not like a grey ball parked next to one.
+    float onSun = smoothstep(DISC_R * 2.4, DISC_R * 0.6, sdm);
+    col = mix(col, vec3(0.02, 0.02, 0.03),
+              smoothstep(moonR, moonR - 0.0030, md) * cover * onSun * 0.95);
+    // The ring, given its own light: it is photosphere, and it has just been
+    // drawn over by the silhouette's soft edge.
+    if (annular > 0.004) {
+      float rim = smoothstep(DISC_R, DISC_R - 0.0016, sdm)
+                * smoothstep(moonR - 0.0016, moonR, md);
+      col += vec3(1.00, 0.96, 0.88) * rim * cover * 1.25;
+      col += vec3(1.00, 0.94, 0.82)
+             * exp(-abs(sdm - (DISC_R + moonR) * 0.5) * 120.0)
+             * cover * smoothstep(0.6, 1.0, cover) * 0.35;
+    }
+    // And the corona, which exists all the time and is visible for about two
+    // minutes at a time. Not drawn at all for an annular eclipse: the ring of
+    // photosphere left showing is a million times brighter and drowns it.
+    float tot = smoothstep(0.88, 1.00, cover) * totalness;
+    if (tot > 0.0) {
+      float ang  = atan(uv.y - moonUV.y, (uv.x - moonUV.x) * aspect);
+      float rays = 0.55 + 0.45 * (0.5 + 0.5 * sin(ang *  7.0 + 1.7))
+                              * (0.5 + 0.5 * sin(ang * 13.0 - 0.9));
+      float glow = exp(-max(md - moonR, 0.0) * 30.0) * step(moonR, md);
+      col += vec3(0.86, 0.90, 1.00) * glow * rays * tot * 0.85;
+      // the chromosphere: a thread of red right on the limb
+      col += vec3(1.00, 0.30, 0.22) * exp(-abs(md - moonR) * 900.0) * tot * 0.55;
+    }
   }
 
   // meteors streak over the curtains
@@ -713,11 +825,25 @@ void main() {
                         HORIZON - sunAlt * SUN_ARC);
   float moonDay  = solarPhase(fract(td - astro.x));
   float moonAlt  = solarAlt(fract(td - astro.x));
-  vec2  moonUV   = vec2(mix(0.10, 0.90, clamp(moonDay, 0.0, 1.0)),
-                        HORIZON - moonAlt * SUN_ARC);
-  float day      = smoothstep(-0.04, 0.32, sunAlt);
+  vec2  moonUV   = mix(vec2(mix(0.10, 0.90, clamp(moonDay, 0.0, 1.0)),
+                            HORIZON - moonAlt * SUN_ARC),
+                       sunUV + vec2(ecl.x / aspect, ecl.y) * DISC_R,
+                       clamp(ecl.z, 0.0, 1.0));
+  // The same eclipse the sky above is having. The water has to go out with it,
+  // or a total eclipse reads as a dark sky over a sunlit lake.
+  float moonRm   = DISC_R * ecl.w;
+  float coverM   = clamp(1.0 - length((sunUV - moonUV) * vec2(aspect, 1.0))
+                               / (DISC_R + moonRm), 0.0, 1.0)
+                 * smoothstep(0.55, 0.95, ecl.z)
+                 * smoothstep(-0.06, 0.02, sunAlt);
+  float eclDimM  = smoothstep(0.55, 1.00, coverM)
+                 * mix(0.38, 1.00,
+                       1.0 - smoothstep(0.004, 0.030,
+                                        max(0.0, DISC_R - moonRm) / DISC_R));
+  float day      = smoothstep(-0.04, 0.32, sunAlt) * (1.0 - 0.92 * eclDimM);
   float moonLit  = smoothstep(-0.05, 0.15, moonAlt)
-                 * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5));
+                 * (0.15 + 0.85 * ((1.0 - cos(6.28318 * astro.x)) * 0.5))
+                 * (1.0 - 0.88 * umbra.x);
   float lit      = max(day, moonLit * 0.60);
 
   vec3 col;
@@ -916,10 +1042,21 @@ void main() {
   vec2 wp = tp - screenFld.xy * 0.7;
   // rain and snow lean with the wind rather than falling on rails
   float lean = clamp(wx2.x * 26.0, -0.85, 0.85);
+  // A gust is not a stronger wind, it is an unsteady one — so it moves the
+  // lean around rather than adding to it, and the rain lashes instead of
+  // slanting. wx2.y is the gust over the steady wind, not the gust itself.
+  lean = clamp(lean + wx2.y * 0.62 * (vnoise(vec2(t * 0.37, 4.1)) - 0.5) * 2.0,
+               -1.30, 1.30);
   if (wx.y > 0.0) {
     float r = rainLayer(wp, t, 1.5, 30.0, 0.22 + lean) * 0.55
-            + rainLayer(wp, t, 2.3, 46.0, 0.28 + lean) * 0.32;
-    col += vec3(0.56, 0.66, 0.82) * r * wx.y * 0.80;
+            + rainLayer(wp, t, 2.3, 46.0, 0.28 + lean) * 0.32
+            // a third, faster, finer layer only under a real downpour
+            + rainLayer(wp, t, 3.6, 68.0, 0.34 + lean) * 0.34 * sev.y;
+    col += vec3(0.56, 0.66, 0.82) * r * wx.y * (0.80 + 0.55 * sev.y);
+    // Past a certain rate you stop seeing individual rain and start seeing the
+    // water in the air between you and everything else.
+    col = mix(col, vec3(0.34, 0.38, 0.45),
+              wx.y * sev.y * 0.34 * smoothstep(0.08, 0.72, uv.y));
     // and it dapples the water it lands on
     if (uv.y >= WATERLINE && uv.y < max(shore.x, WATERLINE)) {
       float dp = vnoise(vec2(uv.x * 110.0, uv.y * 260.0 + t * 7.0));
@@ -934,12 +1071,33 @@ void main() {
     col += vec3(0.92, 0.95, 1.00) * sn * wx.z;
   }
   if (wx.w > 0.0) {
+    // How often it strikes is how unstable the air is, not how it was labelled:
+    // a warned cell flickers continuously, a rumbling one flashes now and then.
+    float rate  = 0.31 + 0.62 * sev.x + 1.15 * sev.y;
     // gate each strike on a hash of the period so they are not metronomic
-    float per   = floor(t * 0.31);
-    float ph    = fract(t * 0.31);
-    float fire  = step(hash21(vec2(per, 11.0)), wx.w * 0.55);
+    float per   = floor(t * rate);
+    float ph    = fract(t * rate);
+    float fire  = step(hash21(vec2(per, 11.0)), wx.w * (0.45 + 0.50 * sev.y));
     float flash = fire * exp(-ph * 26.0) * (0.55 + 0.45 * hash21(vec2(per, 3.0)));
-    col += vec3(0.72, 0.78, 1.00) * flash * 0.60;
+    // A near cell lights the sky from a point rather than evenly: the cloud
+    // above the channel goes white and the rest only catches it.
+    float bx    = hash21(vec2(per, 5.0));
+    float grad  = mix(1.0, exp(-abs(uv.x - bx) * 2.2) * 1.9, sev.y);
+    col += vec3(0.72, 0.78, 1.00) * flash * grad * (0.60 + 0.90 * sev.y);
+
+    // And once it is severe, the channel itself. One stroke, kinked by noise
+    // that is fixed for the period so it does not crawl, drawn only for the
+    // frames the flash is alive.
+    if (sev.y > 0.22 && fire > 0.0) {
+      float yy   = clamp((uv.y - 0.06) / 0.62, 0.0, 1.0);
+      float kink = (vnoise(vec2(yy *  6.0, per)) - 0.5) * 0.26 * yy
+                 + (vnoise(vec2(yy * 21.0, per + 3.0)) - 0.5) * 0.060;
+      float dx   = abs(uv.x - (bx + kink)) * aspect;
+      float bolt = exp(-dx * 260.0) + 0.30 * exp(-dx * 46.0);
+      bolt *= smoothstep(0.06, 0.13, uv.y)
+            * (1.0 - smoothstep(0.62, 0.78, uv.y));
+      col += vec3(0.86, 0.90, 1.00) * bolt * exp(-ph * 40.0) * sev.y * 1.5;
+    }
   }
 
   fragColor = vec4(clamp(col + dither(uv), 0.0, 1.0), 1.0) * qt_Opacity;

@@ -42,8 +42,8 @@ These are the bytes as shipped. They change only when the shader source or the
 
 | file | SHA-256 |
 |---|---|
-| `shaders/aurora.frag` (source) | `413a956d40fcfb0ce5e5ddaaf160033af7f50adc5f193455d90937289eb56d68` |
-| `shaders/aurora.frag.qsb` (shipped) | `f64cbe9f5acf86bfe3253bf519ab77658b68621c45ce690f4d66daa0963e00b1` |
+| `shaders/aurora.frag` (source) | `5b8fbf9985cd61b8c618307a8d05ef3e46253ea5faa24b9d05a82d6774f82f94` |
+| `shaders/aurora.frag.qsb` (shipped) | `e6f0d1443bf0ab0ad1cca23e2c8ae583d703948769d26ac60801635db1f859a9` |
 
 ## Verify it yourself
 
@@ -60,7 +60,7 @@ podman run --rm -v "$PWD":/src:ro docker.io/library/archlinux:base sh -c '
   sha256sum /tmp/rebuilt.qsb /src/shaders/aurora.frag.qsb'
 ```
 
-Both lines must print `f64cbe9f…`. Substitute `docker` for `podman` freely.
+Both lines must print `e6f0d144…`. Substitute `docker` for `podman` freely.
 
 This was run before publishing: the artifact reproduces byte-for-byte both on
 the author's machine and in a clean pinned container.

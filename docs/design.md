@@ -460,6 +460,150 @@ A winter sun now stays low all day, which the fixed model could never show.
 Scrubbing the 23-day window shows the day length itself shortening by about nine
 minutes a day.
 
+### The clock belongs to the place, not the machine
+
+The forecast was always fetched with `timezone=auto`, so its hours were already
+the target's hours. What was not was the clock the scene was seeded from: `tod`
+started at the local wall clock, so asking for Istanbul from Montreal drew
+Istanbul's data under Montreal's sun — a fourteen-hour error, which is night for
+day.
+
+`utc_offset_seconds` comes back on the same reply the hours do, so the two can
+never disagree. One shift function turns a real instant into a `Date` whose
+local getters read the target's wall clock, and everything that needed a
+midnight now takes the target's:
+
+- the seed for `tod`, and the moment a double tap returns to;
+- `t0`, the first sample's distance from midnight — which has to be computed
+  *after* the offset is set, or the entire 23-day window slides;
+- NOAA's Kp timestamps, which are real instants in UTC. Kp is a global number,
+  but *when* it applies is local, and an eight-hour error put the aurora
+  forecast on the wrong side of the night;
+- "Yesterday"/"Tomorrow" in the readout.
+
+Landing on a place in another zone re-seeds the sky to the hour it actually is
+there, unless a finger is on the timeline — a moment that was chosen is not ours
+to take back. The readout names the zone only when it differs from yours; its
+absence is the statement that they agree.
+
+### An eclipse is two discs the same size
+
+The sun's apparent radius is 0.2666°, the moon's mean 0.2596°. That
+near-equality is the only reason an eclipse is a thing that happens at all, and
+the scene used to throw it away: the moon was drawn at nearly twice the sun, so
+the two read as different kinds of object and one could never hide the other.
+They are now the same size, and the moon's own distance — which swings its
+radius from 0.92 to 1.03 of the sun's — decides whether an eclipse goes total or
+leaves a ring showing.
+
+The phase model had to be rebuilt for this. Two counters ticking off a synodic
+and an anomalistic month are good to about half a day, which is fine for a
+crescent in the corner and useless for an alignment that lasts two hours. It is
+now Meeus' mean elements with the largest periodic terms — the moon's true
+longitude less the sun's — which lands within about two minutes, plus the
+ecliptic latitude, because the orbit's five-degree tilt is *why* an eclipse is
+rare rather than monthly.
+
+Two things then had to be got right that are easy to get wrong:
+
+- **Parallax.** At a *total* solar eclipse the geocentric separation of the two
+  centres is around 0.9°, not zero — nearly two disc widths. An observer stands
+  four thousand miles off the centre of the earth and sees the moon displaced by
+  up to its horizontal parallax. Treating the geocentric separation as the
+  criterion found no eclipses at all. What is drawn is what the best-placed
+  observer sees: the separation less the parallax, floored at zero.
+- **Scale.** The rest of this sky compresses a month across a screen width. At
+  that scale the two discs would sit on each other for three days instead of two
+  hours, so near conjunction the moon is placed off the sun at true angular
+  scale instead, and the override is gated so the handover cannot manufacture a
+  shallow false eclipse of its own.
+
+Checked against every eclipse from 2026 to 2028:
+
+| | geocentric lat | moon/sun | drawn as |
+|---|---|---|---|
+| 2026-02-17 | −0.93° | 0.960 | annular |
+| 2026-03-03 | −0.37° | — | total lunar |
+| 2026-08-12 | +0.91° | 1.031 | total |
+| 2026-08-28 | +0.47° | — | partial lunar |
+| 2027-02-06 | −0.27° | 0.914 | annular |
+| 2027-08-02 | +0.16° | 1.060 | total |
+| 2028-07-22 | −0.60° | 1.042 | total |
+| new moon 2026-05-16 | +4.94° | — | nothing |
+| new moon 2026-10-10 | −3.83° | — | nothing |
+
+The lunar case needs no parallax correction, because the shadow is out there
+with the moon. Its depth falls out of the same geometry — umbra 0.70° of radius,
+moon 0.26° — and so, for free, does its duration: three and a half hours of
+shadow with an hour of totality inside it, which is what a total lunar eclipse
+actually is. Penumbral eclipses correctly produce nothing, because a penumbral
+eclipse is invisible.
+
+Totality dims the day, brings the stars out and puts a sunset all the way round
+the horizon; an annular eclipse gets a fraction of the dimming and no stars,
+because a ring of photosphere is millions of times brighter than the corona.
+
+### A thunderstorm is a state of the atmosphere, not a code
+
+Toronto, 2 September, is the case that made this. A storm everyone outdoors
+remembers, and the scene drew ordinary rain — because storminess was decided
+entirely by the WMO code being 95 or above, and the code for that hour was 82,
+"violent rain showers". Asked about the same hour, the four global models said:
+
+| model, 16:00 local | code | precipitation | CAPE | gusts |
+|---|---|---|---|---|
+| GFS (`best_match` here) | 82 violent rain showers | 7.9 mm/h | 1970 | 14 km/h |
+| ICON | 80 rain showers *(96, thunderstorm with hail, an hour later)* | 0.8 mm/h | 1770 | 36 km/h |
+| ECMWF | 95 thunderstorm | 1.2 mm/h | 2690 | 36 km/h |
+| GEM | 51 drizzle | 0.2 mm/h | 2220 | 13 km/h |
+
+They cannot all be right, and picking one is picking a coin toss. They disagree
+about the rate by a factor of forty and about the hour as well. But every one of
+them put CAPE between 1770 and 2690 J/kg, and GFS — the one that called it
+showers — put the lifted index at −6.4. That is not a disagreement: that is a
+severe-thunderstorm atmosphere, and it is what the code is supposed to be a
+summary of.
+
+So the physics decides and the code only votes. `cape` and `lifted_index` come
+back on the forecast request already being made. 2200 J/kg is a strong cell and
+a lifted index of −6.5 says the same thing another way; either alone is enough.
+Instability on its own is just a hot afternoon, though — Toronto had 2140 J/kg
+at 14:00 under a clear sky — so something has to be falling out of it before any
+of it is a storm you can see.
+
+| hour | code | mm/h | CAPE | storm | drawn as |
+|---|---|---|---|---|---|
+| 14:00 | 1 | 0.0 | 2140 | 0.00 | a hot clear afternoon |
+| 15:00 | 3 | 0.0 | 2100 | 0.00 | overcast |
+| **16:00** | 82 | 7.9 | 1970 | **0.98** | **thunderstorm** |
+| 17:00 | 81 | 2.9 | 1510 | 0.64 | thunderstorm |
+| 19:00 | 63 | 6.1 | 170 | 0.23 | heavy rain, no storm |
+
+Rain intensity was recalibrated at the same time: a linear 3 mm/h ceiling
+saturated at moderate rain, so the 8 mm/h hour of a real cell drew exactly what
+an ordinary wet afternoon did.
+
+**Warnings.** There is no free global feed of official warnings — they are
+national, and stitching the NWS, MeteoAlarm and Environment Canada together
+would be three more providers for three parts of the world. What this has
+instead is the *threshold* rather than the bulletin: Environment Canada and the
+NWS both issue a severe thunderstorm warning at roughly 90 km/h gusts, and a
+rainfall warning around 50 mm in an hour. Gusts are taken as the strongest of
+the hours either side, because a damaging gust is a ten-minute event that an
+hourly sample lands on or misses. Above that tier the deck hangs lower and goes
+green-black, the rain gains a third faster layer and a curtain you cannot see
+through, the strike rate climbs, the sky lights from a point instead of evenly,
+and a forked channel is drawn for the frames the flash is alive.
+
+The honest limit: this is one model. On the Toronto cell it reaches a moderate
+warning tier rather than a high one, because GFS — which is what `best_match`
+picks for Toronto — never put that afternoon's gusts above 27 km/h, while ICON
+peaked at 39 and GEM at 46. Taking the worst of several models is what a
+forecaster does for severe weather, and it would cost one more request; it would
+also make every place on earth stormier than it is, which is the opposite of the
+point. CAPE and the lifted index were chosen precisely because they are the
+fields the models agree on.
+
 ### Time passes
 
 Left alone the sky drifts forward at about **one sky-hour per real minute**, so
