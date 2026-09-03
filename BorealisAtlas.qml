@@ -135,8 +135,18 @@ Item {
   function syncTimeOfDay() {
     if (!scene) return
     root.todReturning = false
+    root.pinned = false
+    // The jump is animated, and the drift ticks on the same cadence — so a
+    // tick landing mid-flight reads the intermediate value, writes it back and
+    // strands the sky part-way. Seven hours is a big enough jump for that to
+    // show. The drift stands off until the animation is done.
+    root.settling = true
+    settleTimer.restart()
     scene.tod = clockFraction()
+    root.refreshReadout()
   }
+  property bool settling: false
+  Timer { id: settleTimer; interval: 320; onTriggered: root.settling = false }
 
   // Left alone the sky drifts forward, about an hour of sky per minute of real
   // time, so you look up and the day has moved. Touching it cancels the drift
@@ -166,7 +176,7 @@ Item {
     // wherever it had got to. That showed up the moment the return grew long
     // enough to outlive the readout timer.
     running: root.opened && !root.scrubbing && !root.todReturning
-             && root.inspectMode === 0
+             && !root.pinned && !root.settling && root.inspectMode === 0
     onTriggered: {
       if (!scene) return
       root.drifting = true
@@ -200,6 +210,11 @@ Item {
   function buildReadout() {
         if (!scene) return ""
         root.dataRev            // re-read when a fetch lands
+        // Between asking for a place and its forecast arriving, the only
+        // honest thing to say is that we are still asking. Quoting the old
+        // zone's time under the new place's name is how this got confusing.
+        if (root.tzStale)
+          return "Fetching " + ((root.loc && root.loc.name) || "the sky") + "\u2026"
         var o = root.sky
         var d = root.todToDate(scene.tod)
         var today = root.midnightAtLoc()
@@ -226,7 +241,17 @@ Item {
         return line
   }
   function refreshReadout() {
-    if (root.scrubbing || root.inspectMode > 0) root.readoutLine = buildReadout()
+    if (root.scrubbing || root.inspectMode > 0 || root.pinned || root.notice)
+      root.readoutLine = buildReadout()
+  }
+
+  // Six seconds is long enough to read a line and short enough not to become
+  // furniture. Deliberately not pinned: a place change still lets the sky
+  // drift on afterwards, the way it always has.
+  Timer {
+    id: noticeTimer
+    interval: 6000
+    onTriggered: { root.notice = false; root.refreshReadout() }
   }
 
   // One finger: two taps come home to today, three leave. A single tap does
@@ -360,11 +385,154 @@ Item {
     root.searchNote = ""
   }
 
+  // ---- "when": a date, a time, or both -------------------------------------
+  // The search line took a place and nothing else, which meant the only way to
+  // reach a particular afternoon was to drag for it. It now takes a moment too.
+  //
+  // Written as `place @ when`, or `place, when`, or either half alone. Without
+  // a separator the whole line is read as a moment only if it plainly is one —
+  // it carries a digit, or it is one of a short list of words — because there
+  // are towns called March and Sunday and a search box should not out-think
+  // the person typing into it.
+  readonly property var monthAbbr: ["jan","feb","mar","apr","may","jun",
+                                    "jul","aug","sep","oct","nov","dec"]
+  readonly property var weekdayAbbr: ["sun","mon","tue","wed","thu","fri","sat"]
+  readonly property var plainMoments: ["today","tomorrow","yesterday","tonight",
+                                       "noon","midday","midnight","morning",
+                                       "afternoon","evening","night",
+                                       "sunrise","sunset","dawn","dusk"]
+
+  function looksTemporal(q) {
+    var t = String(q).toLowerCase().trim()
+    if (/\d/.test(t)) return true
+    var w = t.split(/\s+/)
+    for (var i = 0; i < w.length; i++)
+      if (root.plainMoments.indexOf(w[i]) < 0) return false
+    return w.length > 0
+  }
+
+  function daysUntilWeekday(di) {
+    return (di - root.midnightAtLoc().getDay() + 7) % 7
+  }
+
+  // A day and a month with no year means the nearest one, which is what a
+  // person means in December when they type "3 January".
+  function daysUntilDate(y, mon, dom) {
+    var mid = root.midnightAtLoc().getTime()
+    var years = (y !== null) ? [y]
+              : [root.midnightAtLoc().getFullYear() - 1,
+                 root.midnightAtLoc().getFullYear(),
+                 root.midnightAtLoc().getFullYear() + 1]
+    var best = null
+    for (var i = 0; i < years.length; i++) {
+      var n = Math.round((new Date(years[i], mon, dom, 0, 0, 0, 0).getTime() - mid)
+                         / 86400000)
+      if (best === null || Math.abs(n) < Math.abs(best)) best = n
+    }
+    return best
+  }
+
+  // Returns { day, frac, solar } or null. One token it does not understand
+  // means it understood none of them: a half-read date is worse than no date.
+  function parseWhen(q) {
+    var toks = String(q).toLowerCase().replace(/,/g, " ").split(/\s+/)
+    var day = null, frac = null, solar = null, mon = null, dom = null, year = null
+    var seen = 0
+    for (var i = 0; i < toks.length; i++) {
+      var t = toks[i], m
+      if (!t.length) continue
+      seen++
+      if (t === "today")     { day = 0;  continue }
+      if (t === "tomorrow")  { day = 1;  continue }
+      if (t === "yesterday") { day = -1; continue }
+      if (t === "tonight")   { if (day === null) day = 0; frac = 22 / 24; continue }
+      if (t === "noon" || t === "midday") { frac = 0.5;      continue }
+      if (t === "midnight")               { frac = 0.0;      continue }
+      if (t === "morning")                { frac =  9 / 24;  continue }
+      if (t === "afternoon")              { frac = 15 / 24;  continue }
+      if (t === "evening")                { frac = 20 / 24;  continue }
+      if (t === "night")                  { frac = 23 / 24;  continue }
+      if (t === "sunrise" || t === "dawn") { solar = "rise"; continue }
+      if (t === "sunset"  || t === "dusk") { solar = "set";  continue }
+      m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+      if (m) { year = parseInt(m[1], 10); mon = parseInt(m[2], 10) - 1
+               dom = parseInt(m[3], 10); continue }
+      m = t.match(/^([+-]\d{1,2})d?$/)
+      if (m) { day = parseInt(m[1], 10); continue }
+      m = t.match(/^(\d{1,2}):(\d{2})$/)
+      if (m) { frac = (parseInt(m[1], 10) + parseInt(m[2], 10) / 60) / 24; continue }
+      m = t.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)$/)
+      if (m) {
+        var h = parseInt(m[1], 10) % 12
+        if (m[3] === "pm") h += 12
+        frac = (h + (m[2] ? parseInt(m[2], 10) / 60 : 0)) / 24; continue
+      }
+      m = t.match(/^(\d{1,2})h$/)
+      if (m) { frac = parseInt(m[1], 10) / 24; continue }
+      m = t.match(/^(\d{1,2})(?:st|nd|rd|th)?$/)
+      if (m && parseInt(m[1], 10) >= 1 && parseInt(m[1], 10) <= 31) {
+        dom = parseInt(m[1], 10); continue
+      }
+      if (t.length >= 3) {
+        var mi = root.monthAbbr.indexOf(t.substring(0, 3))
+        if (mi >= 0) { mon = mi; continue }
+        var di = root.weekdayAbbr.indexOf(t.substring(0, 3))
+        if (di >= 0) { day = root.daysUntilWeekday(di); continue }
+      }
+      return null
+    }
+    if (!seen) return null
+    // A month with no day, or a day with no month, is not a date — it is far
+    // more likely to be a place or a stray number.
+    if ((mon === null) !== (dom === null)) return null
+    if (mon !== null) day = root.daysUntilDate(year, mon, dom)
+    if (day === null && frac === null && solar === null) return null
+    return { day: (day === null ? 0 : day), frac: frac, solar: solar }
+  }
+
+  // Where the place ends and the moment begins.
+  function splitQuery(q) {
+    var at = q.indexOf("@")
+    if (at >= 0) return { place: q.substring(0, at).trim(),
+                          when:  q.substring(at + 1).trim() }
+    var c = q.lastIndexOf(",")
+    if (c >= 0 && root.parseWhen(q.substring(c + 1).trim()))
+      return { place: q.substring(0, c).trim(), when: q.substring(c + 1).trim() }
+    if (root.looksTemporal(q) && root.parseWhen(q))
+      return { place: "", when: q }
+    return { place: q, when: "" }
+  }
+
+  // Put the sky on the moment that was asked for. Called straight away when
+  // only a date was given, and after the forecast lands when a place was too,
+  // because sunrise depends on both the day and where you are standing.
+  function applyWhen() {
+    var w = root.pendingWhen
+    root.pendingWhen = null
+    if (!w || !scene) return
+    var f = w.frac
+    if (w.solar !== null) {
+      var o = root.resolveSky(w.day + 0.5)
+      f = (w.solar === "rise") ? o.rise : o.set
+    }
+    if (f === null) f = 0.5          // a bare date means the middle of that day
+    var want = w.day + f
+    root.todReturning = false
+    root.drifting = false
+    root.pinned = true
+    root.inspectMode = 0
+    scene.tod = Math.max(root.todMin, Math.min(root.todMax, want))
+    root.notice = true
+    noticeTimer.restart()
+    root.refreshReadout()
+  }
+
   function submitSearch() {
-    var q = root.searchText.trim()
-    if (q.length === 0) {          // empty means "wherever this machine is"
+    var raw = root.searchText.trim()
+    if (raw.length === 0) {        // empty means "wherever this machine is"
       root.searching = false
-      if (!root.chosenLoc) return
+      root.pinned = false
+      if (!root.chosenLoc) { root.syncTimeOfDay(); return }
       root.chosenLoc = null
       root.loc = null; root.fc = null; root.kp = null
       root.ring = null; root.climate = null; root.horizon = null; root.water = null
@@ -372,12 +540,40 @@ Item {
       refreshSky(true)
       return
     }
-    root.searchNote = "Looking for " + q + "…"
+    var q = root.splitQuery(raw)
+    var when = null
+    if (q.when.length) {
+      when = root.parseWhen(q.when)
+      if (!when) { root.searchNote = "Not a date I know"; return }
+      // The window is the fetch's, not the parser's, and saying so beats
+      // silently snapping to the nearest edge.
+      if (when.day < -7 || when.day > 16) {
+        root.searchNote = "Only 7 days back and 16 forward"
+        return
+      }
+    }
+    if (!q.place.length) {
+      if (!when) { root.searchNote = "Nothing to go to"; return }
+      root.searching = false
+      root.searchNote = ""
+      root.pendingWhen = when
+      root.applyWhen()
+      return
+    }
+    root.pendingWhen = when        // applied when that place's forecast lands
+    root.searchNote = "Looking for " + q.place + "…"
     root.geoForSearch = true
-    geocode(q)
+    geocode(q.place)
   }
 
   property bool geoForSearch: false
+  // Notes that mean "that did not work", so the line can say so in amber
+  // rather than in the same calm grey it uses for a hint.
+  readonly property bool searchFailed:
+    root.searchNote === "No such place" || root.searchNote === "Nothing found"
+    || root.searchNote === "Not a date I know"
+    || root.searchNote === "Only 7 days back and 16 forward"
+    || root.searchNote === "Nothing to go to"
 
   // editing shell.json re-resolves immediately, which is the point of having it
   // The ring and the climate belong to the old place, not the new one. Leaving
@@ -504,6 +700,32 @@ Item {
   // machine's own clock, unshifted.
   property var tzOffset: null       // seconds east of UTC, at the target
   property string tzName: ""        // e.g. "GMT+3", for the readout
+  // True from the moment the place changes until that place's forecast lands.
+  // Until then the clock on screen is still the one you came from, so the
+  // readout says it is fetching rather than quoting a time it knows is wrong.
+  property bool tzStale: false
+  // The clock follows the zone, always. Catching every moment that ought to
+  // re-seed it — the cache landing, the overlay opening, the forecast
+  // arriving, the place changing — meant four orderings to get right and one
+  // of them was always wrong. This is the invariant instead: if the zone the
+  // scene is drawn in changes and you are not holding a moment yourself, the
+  // clock moves to that zone's now.
+  onTzOffsetChanged: {
+    if (root.pendingWhen) return          // a date was asked for; it wins
+    if (root.scrubbing || root.todReturning || root.pinned) return
+    if (root.inspectMode !== 0) return
+    root.syncTimeOfDay()
+  }
+  // A moment you asked for, as against one the drift wandered to. It holds the
+  // sky still and keeps the readout up: a date you typed is a question, not
+  // ambience, and it should not slide out from under you while you read it.
+  property bool pinned: false
+  // Something just changed that you should be told about — the place, or the
+  // date. Shows the readout for a few seconds without pinning anything.
+  property bool notice: false
+  // Parsed out of the search line and applied once the forecast for that place
+  // is here, because sunrise is a property of the day and the place.
+  property var pendingWhen: null
 
   // Milliseconds to add to a real instant to get a Date whose *local* getters
   // read the target's wall clock. getTimezoneOffset() is read now rather than
@@ -523,6 +745,74 @@ Item {
   function tzElsewhere() {
     return root.tzOffset !== null
         && Math.abs(root.tzShiftMs()) > 60000
+  }
+
+  // Every request carries the generation of the place it was made for. A reply
+  // that arrives for a place you have already left is not late data, it is
+  // wrong data: it would file Toronto's forecast under Istanbul's name.
+  property int locGen: 0
+  property real _genLat: 1e9
+  property real _genLon: 1e9
+
+  // A fetch already in flight makes the next one a no-op, which is exactly
+  // backwards when the reason for the next one is that you have moved: typing
+  // a new place while the old place's forecast was still on the wire silently
+  // dropped the new one, and the scene kept the old sky, the old clock and no
+  // forecast at all.
+  //
+  // Killing the running request and restarting it in the same turn is not
+  // reliable — a false-then-true on `running` can collapse to no change — so
+  // the old one is left to finish and its reply discarded by generation, and
+  // the top-up below re-asks. A second and a half late is not a problem; the
+  // wrong city's weather is.
+  function beginFetch(p) { p.gen = root.locGen }
+  function stale(p) { return p.gen !== root.locGen }
+
+  // What the place you are looking at still owes you. Also covers a request
+  // that simply failed — a timeout or a rate limit used to leave a hole until
+  // the next refresh, which for the horizon meant no horizon at all.
+  readonly property bool dataMissing:
+    loc !== null && (fc === null || kp === null || climate === null
+                     || horizon === null || water === null)
+  property int topUps: 0
+  function topUp() {
+    if (!loc) return
+    root.topUps++
+    if (!fc && !fcProc.running) fetchForecast()
+    if (!kp && !kpProc.running) fetchKp()
+    if (!climate && !climProc.running) fetchClimate()
+    if ((!horizon || !water)
+        && !elevProc.running && !fanProc.running && !nearProc.running)
+      fetchHorizon()
+  }
+  Timer {
+    interval: 2200; repeat: true
+    // Bounded, so a place the elevation service will not answer for costs six
+    // tries and then stops rather than hammering it for as long as you look.
+    running: root.opened && root.dataMissing && root.topUps < 6
+    onTriggered: root.topUp()
+  }
+
+  onLocChanged: {
+    if (!loc) return
+    if (Math.abs(loc.lat - root._genLat) < 1e-6
+        && Math.abs(loc.lon - root._genLon) < 1e-6) return
+    root._genLat = loc.lat; root._genLon = loc.lon
+    root.locGen++
+    root.topUps = 0
+    // Everything below is a property of where you were.
+    root.fc = null; root.kp = null; root.ring = null
+    root.climate = null; root.horizon = null; root.water = null
+    root.elevation = 0
+    root._lastPush = -9999
+    // The zone on screen is still the old one until the new forecast lands,
+    // and the readout says as much rather than quoting a time it knows is
+    // wrong. This is also what makes the arrival re-seed the clock even when
+    // two places happen to share an offset.
+    root.tzStale = true
+    root.notice = true
+    noticeTimer.restart()
+    root.refreshReadout()
   }
 
   property real elevation: 0
@@ -1102,14 +1392,21 @@ Item {
     return { rise: rise, set: set }
   }
 
-  // NOAA time_tag is a real instant in UTC, so it is shifted into the target's
-  // frame before being measured against the target's midnight. Kp is a global
-  // number, but *when* it applies is local, and an eight-hour error put the
-  // aurora forecast on the wrong side of the night.
-  function hoursFromMidnightUtc(iso) {        // NOAA time_tag, UTC, no suffix
-    var dt = new Date(String(iso).replace(" ", "T") + "Z")
-    return (dt.getTime() + root.tzShiftMs() - root.midnightAtLoc().getTime())
-           / 3600000.0
+  // NOAA time_tag is a real instant in UTC. Kp is a global number, but *when*
+  // it applies is local — so the instants are kept and the hours derived from
+  // them, rather than baked in at parse time. Baking them in meant a reply that
+  // arrived before the forecast was measured against the zone we were leaving,
+  // and an eight-hour error puts the aurora on the wrong side of the night.
+  function epochOfUtc(iso) {
+    return new Date(String(iso).replace(" ", "T") + "Z").getTime()
+  }
+  function rebuildKpHours() {
+    if (!kp || !kp.ms) return
+    var mid = root.midnightAtLoc().getTime(), sh = root.tzShiftMs()
+    var h = []
+    for (var i = 0; i < kp.ms.length; i++)
+      h.push((kp.ms[i] + sh - mid) / 3600000.0)
+    root.kp = { ms: kp.ms, vals: kp.vals, hrs: h }
   }
 
   function refreshSky(force) {
@@ -1156,6 +1453,7 @@ Item {
 
   function fetchForecast() {
     if (!loc || fcProc.running) return
+    root.beginFetch(fcProc)
     fcProc.command = root.curlCmd(10, root.capForecast,
       "https://api.open-meteo.com/v1/forecast"
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
@@ -1180,6 +1478,7 @@ Item {
   // Zermatt 0.89, Montreal 1.20 — which is exactly the right order.
   function fetchClimate() {
     if (!loc || climProc.running) return
+    root.beginFetch(climProc)
     // the archive runs a few days behind live, so end a week back
     var end = new Date(Date.now() - 7 * 86400000)
     var start = new Date(end.getTime() - 365 * 86400000)
@@ -1258,6 +1557,7 @@ Item {
 
   function fetchHorizon() {
     if (!loc || elevProc.running) return
+    root.beginFetch(elevProc)
     var la = [loc.lat.toFixed(4)], lo = [loc.lon.toFixed(4)]
     for (var k = 0; k < root.hzAz; k++) {
       var az = 360.0 * k / root.hzAz
@@ -1288,6 +1588,7 @@ Item {
   // is a view across water toward land, and standing anywhere else fights it.
   function fetchHorizonFan(vx, vy, centreAz, rings) {
     if (!loc || fanProc.running) return
+    root.beginFetch(fanProc)
     var vd = Math.sqrt(vx * vx + vy * vy)
     var vlat = loc.lat, vlon = loc.lon
     if (vd > 1.0) {
@@ -1337,6 +1638,7 @@ Item {
 
   function fetchNearField() {
     if (!loc || nearProc.running) return
+    root.beginFetch(nearProc)
     var la = [], lo = []
     for (var i = 0; i < root.nearN; i++) {
       for (var j = 0; j < root.nearN; j++) {
@@ -1376,6 +1678,7 @@ Item {
 
   function fetchKp() {
     if (kpProc.running) return
+    root.beginFetch(kpProc)
     kpProc.running = true
   }
 
@@ -1525,9 +1828,13 @@ Item {
       // Series are re-checked exactly as they are on arrival from the network,
       // because a file can be edited and a cached fc feeds the same indexing.
       fc = root.validFc(c.fc)
-      kp = (c.kp && root.capArray(c.kp.hrs, root.maxDaily)
-                 && root.capArray(c.kp.vals, root.maxDaily)
-                 && c.kp.hrs.length === c.kp.vals.length) ? c.kp : null
+      // Instants, not hours: a cache written under another zone would
+      // otherwise restore that zone's idea of when tonight is.
+      kp = (c.kp && root.numArray(c.kp.ms, root.maxDaily, 0, 4102444800000, false)
+                 && root.numArray(c.kp.vals, root.maxDaily, 0, 9, false)
+                 && c.kp.ms.length === c.kp.vals.length)
+         ? { ms: c.kp.ms, vals: c.kp.vals, hrs: [] } : null
+      root.rebuildKpHours()
       ring = (c.ring && root.finiteIn(c.ring.spread, 0, 9000) !== null
                      && root.finiteIn(c.ring.sea, 0, 1) !== null) ? c.ring : null
       elevation = root.finiteIn(c.elevation, -500, 9000) || 0
@@ -1712,9 +2019,11 @@ Item {
 
   Process {
     id: nearProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(nearProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
@@ -1805,9 +2114,11 @@ Item {
 
   Process {
     id: fanProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(fanProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
@@ -1893,9 +2204,11 @@ Item {
 
   Process {
     id: fcProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(fcProc)) return   // a reply for a place we have left
         try {
           var j = root.boundedParse(text, root.capForecast)
           if (!j) return
@@ -1968,14 +2281,23 @@ Item {
                       cape: cape, li: li, gust: gust,
                       flz: flz,
                       rise: sr.rise, set: sr.set }
-          // Landing on a place in another zone moves what "now" means, so the
-          // sky is re-seeded to the hour it actually is there — unless a finger
-          // is on it, in which case the moment on screen was chosen and is not
-          // ours to take back.
-          if (moved && root.opened && !root.scrubbing && !root.todReturning
-              && root.inspectMode === 0)
+          // Kp's hours are measured against the target's midnight, and the
+          // target may only just have changed.
+          root.rebuildKpHours()
+
+          // Re-seeding the clock is onTzOffsetChanged's job above, and it has
+          // already run if the offset moved. What is left here is the case it
+          // cannot see: the same offset, but a place we had marked as not yet
+          // answered for — and the date, if one was typed with the place.
+          var wasStale = root.tzStale
+          root.tzStale = false
+          if (root.pendingWhen) root.applyWhen()
+          else if (wasStale && !moved && root.opened && !root.scrubbing
+                   && !root.todReturning && !root.pinned
+                   && root.inspectMode === 0)
             root.syncTimeOfDay()
-          root.pushSky(); root.saveCache()
+          if (wasStale) { root.notice = true; noticeTimer.restart() }
+          root.pushSky(); root.refreshReadout(); root.saveCache()
         } catch (e) {}
       }
     }
@@ -1983,6 +2305,7 @@ Item {
 
   Process {
     id: kpProc
+    property int gen: 0
     command: root.curlCmd(8, root.capKp,
       "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json")
     stdout: StdioCollector {
@@ -2002,14 +2325,15 @@ Item {
             if (typeof row.time_tag !== "string" || row.time_tag.length > 40) return
             if (root.finiteIn(row.kp, 0, 9) === null) return
           }
-          var hrs = [], vals = []
+          var ms = [], vals = []
           for (var i = 0; i < arr.length; i++) {
             var e = arr[i]
             if (!e || e.kp === undefined || e.kp === null) continue
-            hrs.push(root.hoursFromMidnightUtc(e.time_tag))
+            ms.push(root.epochOfUtc(e.time_tag))
             vals.push(parseFloat(e.kp))
           }
-          root.kp = { hrs: hrs, vals: vals }
+          root.kp = { ms: ms, vals: vals, hrs: [] }
+          root.rebuildKpHours()
           root.pushSky(); root.saveCache()
         } catch (e) {}
       }
@@ -2018,9 +2342,11 @@ Item {
 
   Process {
     id: climProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(climProc)) return   // a reply for a place we have left
         try {
           var cj = root.boundedParse(text, root.capClimate)
           var d = cj && cj.daily
@@ -2048,9 +2374,11 @@ Item {
 
   Process {
     id: elevProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(elevProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
@@ -2113,9 +2441,9 @@ Item {
         try {
           var gj = root.boundedParse(text, root.capGeocode)
           var gr = gj && root.capArray(gj.results, 32)
-          if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.searchNote = "Nothing found" } return }
+          if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchNote = "Nothing found" } return }
           var r = root.validLoc(gr[0])
-          if (!r) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.searchNote = "Nothing found" } return }
+          if (!r) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchNote = "Nothing found" } return }
           // validLoc has already canonicalised the coordinates and capped the
           // strings, so this is the sanitised object, not the reply.
           var nl = r
@@ -2136,6 +2464,7 @@ Item {
           if (root.geoForSearch) {
             // say so rather than silently going somewhere else
             root.geoForSearch = false
+            root.pendingWhen = null
             root.searchNote = "No such place"
           } else if (!locProc.running) locProc.running = true
         }
@@ -2335,6 +2664,7 @@ Item {
         if (touchArea.activeCount >= 1 && touchArea.gestureMoved) root.cycleInspect()
         root.todReturning = false
         root.drifting = false
+        root.pinned = false
         readoutHideTimer.stop()
         touchArea.activeCount += points.length
         touchArea.gestureMaxPoints = Math.max(touchArea.gestureMaxPoints, touchArea.activeCount)
@@ -2456,7 +2786,8 @@ Item {
       spacing: parent.height * 0.008
       // Kept visible while parked away from the present, so a held forecast
       // always says which moment you are looking at.
-      opacity: (root.scrubbing || root.inspectMode > 0) ? 1
+      opacity: (root.scrubbing || root.inspectMode > 0 || root.pinned) ? 1
+             : root.notice ? 0.92
              : root.awayFromNow ? 0.78 : 0
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
@@ -2513,7 +2844,8 @@ Item {
       anchors.bottomMargin: parent.height * 0.036
       width: parent.width * 0.52
       height: Math.max(3, parent.height * 0.0042)
-      opacity: (root.scrubbing || root.inspectMode > 0 || root.awayFromNow) ? 0.72 : 0
+      opacity: (root.scrubbing || root.inspectMode > 0 || root.pinned
+                || root.notice || root.awayFromNow) ? 0.72 : 0
       visible: opacity > 0.01
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
@@ -2525,7 +2857,11 @@ Item {
       Connections {
         target: scene
         function onTodChanged() {
-          if (root.scrubbing || root.inspectMode > 0) {
+          // Also while parked or announcing: a jump to a typed date is
+          // animated, and without this the line kept whatever time it read as
+          // the animation set off rather than the one it arrived at.
+          if (root.scrubbing || root.inspectMode > 0
+              || root.pinned || root.notice) {
             strip.centre = scene.tod
             root.refreshReadout()
           }
@@ -2644,15 +2980,17 @@ Item {
           // checkable by grep rather than by reading each binding.
           textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
-          color: root.searchNote === "No such place" ? "#e8a37c" : "#eaf0f8"
+          color: root.searchFailed ? "#e8a37c" : "#eaf0f8"
           opacity: 0.62
           font.pixelSize: Math.max(11, root.sceneH * 0.0155)
           horizontalAlignment: Text.AlignHCenter
           text: root.searchNote !== "" ? root.searchNote
               : (root.chosenLoc
-                 ? "Enter to go  \u00b7  empty Enter follows this machine again"
+                 ? "A place, a moment, or both: Istanbul @ tomorrow 15:00"
+                   + "  \u00b7  empty Enter follows this machine again"
                    + "  \u00b7  Esc to cancel"
-                 : "Enter to go  \u00b7  Esc to cancel")
+                 : "A place, a moment, or both: Istanbul @ tomorrow 15:00"
+                   + "  \u00b7  Esc to cancel")
         }
       }
     }
@@ -2673,7 +3011,7 @@ Item {
             root.searchText = root.searchText.slice(0, -1)
             root.searchNote = ""
           } else if (event.text && event.text.length === 1
-                     && event.text >= " " && root.searchText.length < 40) {
+                     && event.text >= " " && root.searchText.length < 60) {
             root.searchText += event.text
             root.searchNote = ""
           }
