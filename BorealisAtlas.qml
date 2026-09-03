@@ -128,15 +128,25 @@ Item {
 
 
   function clockFraction() {
-    var n = new Date()
+    var n = root.nowAtLoc()
     return (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds()) / 86400.0
   }
 
   function syncTimeOfDay() {
     if (!scene) return
     root.todReturning = false
+    root.pinned = false
+    // The jump is animated, and the drift ticks on the same cadence — so a
+    // tick landing mid-flight reads the intermediate value, writes it back and
+    // strands the sky part-way. Seven hours is a big enough jump for that to
+    // show. The drift stands off until the animation is done.
+    root.settling = true
+    settleTimer.restart()
     scene.tod = clockFraction()
+    root.refreshReadout()
   }
+  property bool settling: false
+  Timer { id: settleTimer; interval: 320; onTriggered: root.settling = false }
 
   // Left alone the sky drifts forward, about an hour of sky per minute of real
   // time, so you look up and the day has moved. Touching it cancels the drift
@@ -166,7 +176,7 @@ Item {
     // wherever it had got to. That showed up the moment the return grew long
     // enough to outlive the readout timer.
     running: root.opened && !root.scrubbing && !root.todReturning
-             && root.inspectMode === 0
+             && !root.pinned && !root.settling && root.inspectMode === 0
     onTriggered: {
       if (!scene) return
       root.drifting = true
@@ -200,14 +210,22 @@ Item {
   function buildReadout() {
         if (!scene) return ""
         root.dataRev            // re-read when a fetch lands
+        // Between asking for a place and its forecast arriving, the only
+        // honest thing to say is that we are still asking. Quoting the old
+        // zone's time under the new place's name is how this got confusing.
+        if (root.tzStale)
+          return "Fetching " + ((root.loc && root.loc.name) || "the sky") + "\u2026"
         var o = root.sky
         var d = root.todToDate(scene.tod)
-        var today = new Date(); today.setHours(0, 0, 0, 0)
+        var today = root.midnightAtLoc()
         var dd = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
                              - today.getTime()) / 86400000)
         // beyond tomorrow the date line underneath names the day already
         var tag = dd === -1 ? "Yesterday " : dd === 1 ? "Tomorrow " : ""
         var line = tag + Qt.formatTime(d, "HH:mm")
+        // Only when it is not your own clock: naming the zone every time would
+        // be noise, and its absence is itself the statement that they agree.
+        if (root.tzElsewhere() && root.tzName) line += " " + root.tzName
         if (o.has) {
           line += "   " + o.cond
           if (o.temp !== null) line += "   " + Math.round(o.temp) + "\u00b0"
@@ -223,7 +241,17 @@ Item {
         return line
   }
   function refreshReadout() {
-    if (root.scrubbing || root.inspectMode > 0) root.readoutLine = buildReadout()
+    if (root.scrubbing || root.inspectMode > 0 || root.pinned || root.notice)
+      root.readoutLine = buildReadout()
+  }
+
+  // Six seconds is long enough to read a line and short enough not to become
+  // furniture. Deliberately not pinned: a place change still lets the sky
+  // drift on afterwards, the way it always has.
+  Timer {
+    id: noticeTimer
+    interval: 6000
+    onTriggered: { root.notice = false; root.refreshReadout() }
   }
 
   // One finger: two taps come home to today, three leave. A single tap does
@@ -357,11 +385,154 @@ Item {
     root.searchNote = ""
   }
 
+  // ---- "when": a date, a time, or both -------------------------------------
+  // The search line took a place and nothing else, which meant the only way to
+  // reach a particular afternoon was to drag for it. It now takes a moment too.
+  //
+  // Written as `place @ when`, or `place, when`, or either half alone. Without
+  // a separator the whole line is read as a moment only if it plainly is one —
+  // it carries a digit, or it is one of a short list of words — because there
+  // are towns called March and Sunday and a search box should not out-think
+  // the person typing into it.
+  readonly property var monthAbbr: ["jan","feb","mar","apr","may","jun",
+                                    "jul","aug","sep","oct","nov","dec"]
+  readonly property var weekdayAbbr: ["sun","mon","tue","wed","thu","fri","sat"]
+  readonly property var plainMoments: ["today","tomorrow","yesterday","tonight",
+                                       "noon","midday","midnight","morning",
+                                       "afternoon","evening","night",
+                                       "sunrise","sunset","dawn","dusk"]
+
+  function looksTemporal(q) {
+    var t = String(q).toLowerCase().trim()
+    if (/\d/.test(t)) return true
+    var w = t.split(/\s+/)
+    for (var i = 0; i < w.length; i++)
+      if (root.plainMoments.indexOf(w[i]) < 0) return false
+    return w.length > 0
+  }
+
+  function daysUntilWeekday(di) {
+    return (di - root.midnightAtLoc().getDay() + 7) % 7
+  }
+
+  // A day and a month with no year means the nearest one, which is what a
+  // person means in December when they type "3 January".
+  function daysUntilDate(y, mon, dom) {
+    var mid = root.midnightAtLoc().getTime()
+    var years = (y !== null) ? [y]
+              : [root.midnightAtLoc().getFullYear() - 1,
+                 root.midnightAtLoc().getFullYear(),
+                 root.midnightAtLoc().getFullYear() + 1]
+    var best = null
+    for (var i = 0; i < years.length; i++) {
+      var n = Math.round((new Date(years[i], mon, dom, 0, 0, 0, 0).getTime() - mid)
+                         / 86400000)
+      if (best === null || Math.abs(n) < Math.abs(best)) best = n
+    }
+    return best
+  }
+
+  // Returns { day, frac, solar } or null. One token it does not understand
+  // means it understood none of them: a half-read date is worse than no date.
+  function parseWhen(q) {
+    var toks = String(q).toLowerCase().replace(/,/g, " ").split(/\s+/)
+    var day = null, frac = null, solar = null, mon = null, dom = null, year = null
+    var seen = 0
+    for (var i = 0; i < toks.length; i++) {
+      var t = toks[i], m
+      if (!t.length) continue
+      seen++
+      if (t === "today")     { day = 0;  continue }
+      if (t === "tomorrow")  { day = 1;  continue }
+      if (t === "yesterday") { day = -1; continue }
+      if (t === "tonight")   { if (day === null) day = 0; frac = 22 / 24; continue }
+      if (t === "noon" || t === "midday") { frac = 0.5;      continue }
+      if (t === "midnight")               { frac = 0.0;      continue }
+      if (t === "morning")                { frac =  9 / 24;  continue }
+      if (t === "afternoon")              { frac = 15 / 24;  continue }
+      if (t === "evening")                { frac = 20 / 24;  continue }
+      if (t === "night")                  { frac = 23 / 24;  continue }
+      if (t === "sunrise" || t === "dawn") { solar = "rise"; continue }
+      if (t === "sunset"  || t === "dusk") { solar = "set";  continue }
+      m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+      if (m) { year = parseInt(m[1], 10); mon = parseInt(m[2], 10) - 1
+               dom = parseInt(m[3], 10); continue }
+      m = t.match(/^([+-]\d{1,2})d?$/)
+      if (m) { day = parseInt(m[1], 10); continue }
+      m = t.match(/^(\d{1,2}):(\d{2})$/)
+      if (m) { frac = (parseInt(m[1], 10) + parseInt(m[2], 10) / 60) / 24; continue }
+      m = t.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)$/)
+      if (m) {
+        var h = parseInt(m[1], 10) % 12
+        if (m[3] === "pm") h += 12
+        frac = (h + (m[2] ? parseInt(m[2], 10) / 60 : 0)) / 24; continue
+      }
+      m = t.match(/^(\d{1,2})h$/)
+      if (m) { frac = parseInt(m[1], 10) / 24; continue }
+      m = t.match(/^(\d{1,2})(?:st|nd|rd|th)?$/)
+      if (m && parseInt(m[1], 10) >= 1 && parseInt(m[1], 10) <= 31) {
+        dom = parseInt(m[1], 10); continue
+      }
+      if (t.length >= 3) {
+        var mi = root.monthAbbr.indexOf(t.substring(0, 3))
+        if (mi >= 0) { mon = mi; continue }
+        var di = root.weekdayAbbr.indexOf(t.substring(0, 3))
+        if (di >= 0) { day = root.daysUntilWeekday(di); continue }
+      }
+      return null
+    }
+    if (!seen) return null
+    // A month with no day, or a day with no month, is not a date — it is far
+    // more likely to be a place or a stray number.
+    if ((mon === null) !== (dom === null)) return null
+    if (mon !== null) day = root.daysUntilDate(year, mon, dom)
+    if (day === null && frac === null && solar === null) return null
+    return { day: (day === null ? 0 : day), frac: frac, solar: solar }
+  }
+
+  // Where the place ends and the moment begins.
+  function splitQuery(q) {
+    var at = q.indexOf("@")
+    if (at >= 0) return { place: q.substring(0, at).trim(),
+                          when:  q.substring(at + 1).trim() }
+    var c = q.lastIndexOf(",")
+    if (c >= 0 && root.parseWhen(q.substring(c + 1).trim()))
+      return { place: q.substring(0, c).trim(), when: q.substring(c + 1).trim() }
+    if (root.looksTemporal(q) && root.parseWhen(q))
+      return { place: "", when: q }
+    return { place: q, when: "" }
+  }
+
+  // Put the sky on the moment that was asked for. Called straight away when
+  // only a date was given, and after the forecast lands when a place was too,
+  // because sunrise depends on both the day and where you are standing.
+  function applyWhen() {
+    var w = root.pendingWhen
+    root.pendingWhen = null
+    if (!w || !scene) return
+    var f = w.frac
+    if (w.solar !== null) {
+      var o = root.resolveSky(w.day + 0.5)
+      f = (w.solar === "rise") ? o.rise : o.set
+    }
+    if (f === null) f = 0.5          // a bare date means the middle of that day
+    var want = w.day + f
+    root.todReturning = false
+    root.drifting = false
+    root.pinned = true
+    root.inspectMode = 0
+    scene.tod = Math.max(root.todMin, Math.min(root.todMax, want))
+    root.notice = true
+    noticeTimer.restart()
+    root.refreshReadout()
+  }
+
   function submitSearch() {
-    var q = root.searchText.trim()
-    if (q.length === 0) {          // empty means "wherever this machine is"
+    var raw = root.searchText.trim()
+    if (raw.length === 0) {        // empty means "wherever this machine is"
       root.searching = false
-      if (!root.chosenLoc) return
+      root.pinned = false
+      if (!root.chosenLoc) { root.syncTimeOfDay(); return }
       root.chosenLoc = null
       root.loc = null; root.fc = null; root.kp = null
       root.ring = null; root.climate = null; root.horizon = null; root.water = null
@@ -369,12 +540,40 @@ Item {
       refreshSky(true)
       return
     }
-    root.searchNote = "Looking for " + q + "…"
+    var q = root.splitQuery(raw)
+    var when = null
+    if (q.when.length) {
+      when = root.parseWhen(q.when)
+      if (!when) { root.searchNote = "Not a date I know"; return }
+      // The window is the fetch's, not the parser's, and saying so beats
+      // silently snapping to the nearest edge.
+      if (when.day < -7 || when.day > 16) {
+        root.searchNote = "Only 7 days back and 16 forward"
+        return
+      }
+    }
+    if (!q.place.length) {
+      if (!when) { root.searchNote = "Nothing to go to"; return }
+      root.searching = false
+      root.searchNote = ""
+      root.pendingWhen = when
+      root.applyWhen()
+      return
+    }
+    root.pendingWhen = when        // applied when that place's forecast lands
+    root.searchNote = "Looking for " + q.place + "…"
     root.geoForSearch = true
-    geocode(q)
+    geocode(q.place)
   }
 
   property bool geoForSearch: false
+  // Notes that mean "that did not work", so the line can say so in amber
+  // rather than in the same calm grey it uses for a hint.
+  readonly property bool searchFailed:
+    root.searchNote === "No such place" || root.searchNote === "Nothing found"
+    || root.searchNote === "Not a date I know"
+    || root.searchNote === "Only 7 days back and 16 forward"
+    || root.searchNote === "Nothing to go to"
 
   // editing shell.json re-resolves immediately, which is the point of having it
   // The ring and the climate belong to the old place, not the new one. Leaving
@@ -491,6 +690,131 @@ Item {
   }
 
   property var loc: null      // { lat, lon, name, country }
+  // The clock belongs to the place you are looking at, not to the machine you
+  // are looking from. Everything in the scene already did — the forecast is
+  // fetched with timezone=auto, so its hours are Istanbul's hours — but `tod`
+  // was seeded from the local wall clock, which put Istanbul's data under
+  // Montreal's sun. utc_offset_seconds comes back on the same reply the hours
+  // do, so the two can never disagree.
+  // Null means "not known yet", which behaves exactly as this did before: the
+  // machine's own clock, unshifted.
+  property var tzOffset: null       // seconds east of UTC, at the target
+  property string tzName: ""        // e.g. "GMT+3", for the readout
+  // True from the moment the place changes until that place's forecast lands.
+  // Until then the clock on screen is still the one you came from, so the
+  // readout says it is fetching rather than quoting a time it knows is wrong.
+  property bool tzStale: false
+  // The clock follows the zone, always. Catching every moment that ought to
+  // re-seed it — the cache landing, the overlay opening, the forecast
+  // arriving, the place changing — meant four orderings to get right and one
+  // of them was always wrong. This is the invariant instead: if the zone the
+  // scene is drawn in changes and you are not holding a moment yourself, the
+  // clock moves to that zone's now.
+  onTzOffsetChanged: {
+    if (root.pendingWhen) return          // a date was asked for; it wins
+    if (root.scrubbing || root.todReturning || root.pinned) return
+    if (root.inspectMode !== 0) return
+    root.syncTimeOfDay()
+  }
+  // A moment you asked for, as against one the drift wandered to. It holds the
+  // sky still and keeps the readout up: a date you typed is a question, not
+  // ambience, and it should not slide out from under you while you read it.
+  property bool pinned: false
+  // Something just changed that you should be told about — the place, or the
+  // date. Shows the readout for a few seconds without pinning anything.
+  property bool notice: false
+  // Parsed out of the search line and applied once the forecast for that place
+  // is here, because sunrise is a property of the day and the place.
+  property var pendingWhen: null
+
+  // Milliseconds to add to a real instant to get a Date whose *local* getters
+  // read the target's wall clock. getTimezoneOffset() is read now rather than
+  // cached because it is itself daylight-saving dependent.
+  function tzShiftMs() {
+    if (root.tzOffset === null) return 0
+    return root.tzOffset * 1000 + new Date().getTimezoneOffset() * 60000
+  }
+  function nowAtLoc() { return new Date(Date.now() + root.tzShiftMs()) }
+  function midnightAtLoc() {
+    var d = root.nowAtLoc()
+    d.setHours(0, 0, 0, 0)
+    return d
+  }
+  // True when the place you are looking at is not on your own clock, which is
+  // the only time the readout needs to say which clock it is quoting.
+  function tzElsewhere() {
+    return root.tzOffset !== null
+        && Math.abs(root.tzShiftMs()) > 60000
+  }
+
+  // Every request carries the generation of the place it was made for. A reply
+  // that arrives for a place you have already left is not late data, it is
+  // wrong data: it would file Toronto's forecast under Istanbul's name.
+  property int locGen: 0
+  property real _genLat: 1e9
+  property real _genLon: 1e9
+
+  // A fetch already in flight makes the next one a no-op, which is exactly
+  // backwards when the reason for the next one is that you have moved: typing
+  // a new place while the old place's forecast was still on the wire silently
+  // dropped the new one, and the scene kept the old sky, the old clock and no
+  // forecast at all.
+  //
+  // Killing the running request and restarting it in the same turn is not
+  // reliable — a false-then-true on `running` can collapse to no change — so
+  // the old one is left to finish and its reply discarded by generation, and
+  // the top-up below re-asks. A second and a half late is not a problem; the
+  // wrong city's weather is.
+  function beginFetch(p) { p.gen = root.locGen }
+  function stale(p) { return p.gen !== root.locGen }
+
+  // What the place you are looking at still owes you. Also covers a request
+  // that simply failed — a timeout or a rate limit used to leave a hole until
+  // the next refresh, which for the horizon meant no horizon at all.
+  readonly property bool dataMissing:
+    loc !== null && (fc === null || kp === null || climate === null
+                     || horizon === null || water === null)
+  property int topUps: 0
+  function topUp() {
+    if (!loc) return
+    root.topUps++
+    if (!fc && !fcProc.running) fetchForecast()
+    if (!kp && !kpProc.running) fetchKp()
+    if (!climate && !climProc.running) fetchClimate()
+    if ((!horizon || !water)
+        && !elevProc.running && !fanProc.running && !nearProc.running)
+      fetchHorizon()
+  }
+  Timer {
+    interval: 2200; repeat: true
+    // Bounded, so a place the elevation service will not answer for costs six
+    // tries and then stops rather than hammering it for as long as you look.
+    running: root.opened && root.dataMissing && root.topUps < 6
+    onTriggered: root.topUp()
+  }
+
+  onLocChanged: {
+    if (!loc) return
+    if (Math.abs(loc.lat - root._genLat) < 1e-6
+        && Math.abs(loc.lon - root._genLon) < 1e-6) return
+    root._genLat = loc.lat; root._genLon = loc.lon
+    root.locGen++
+    root.topUps = 0
+    // Everything below is a property of where you were.
+    root.fc = null; root.kp = null; root.ring = null
+    root.climate = null; root.horizon = null; root.water = null
+    root.elevation = 0
+    root._lastPush = -9999
+    // The zone on screen is still the old one until the new forecast lands,
+    // and the readout says as much rather than quoting a time it knows is
+    // wrong. This is also what makes the arrival re-seed the clock even when
+    // two places happen to share an offset.
+    root.tzStale = true
+    root.notice = true
+    noticeTimer.restart()
+    root.refreshReadout()
+  }
+
   property real elevation: 0
   property var ring: null     // { spread (m across ~50 km), sea (0..1) }
   property var climate: null  // { ai } — a year of P / PET
@@ -571,8 +895,21 @@ Item {
   property real lastFetchMs: 0
 
   // ---- moon: pure arithmetic, no network -----------------------------------
-  readonly property real synodicDays: 29.530588853
-  readonly property real anomalisticDays: 27.554549878
+  // This used to be two counters ticking off a synodic and an anomalistic month
+  // from one reference new moon. That is accurate to about half a day in phase,
+  // which was fine while the moon was only ever a crescent in the corner — and
+  // is not fine now that the moon has to be in the right place to the hour, or
+  // an eclipse lands on the wrong evening. So the mean elements are Meeus'
+  // (Astronomical Algorithms, ch. 45-47) with the largest periodic terms, which
+  // is within about five hours across every eclipse of this decade.
+  //
+  // The sun's apparent radius is 0.2666 degrees and the moon's mean 0.2596, and
+  // that near-equality is the only reason an eclipse is a thing that happens at
+  // all. Offsets below are therefore measured in solar radii: the shader owns
+  // the drawn size, this owns the angle.
+  // The sun's apparent radius, used as the unit everything below is measured
+  // in: the shader owns how big a disc is drawn, this owns the angle.
+  readonly property real moonSunMean: 0.9737     // mean moon radius / sun radius
 
   property var _moonCache: null
   property real _moonAt: -9999
@@ -586,20 +923,142 @@ Item {
   }
 
   function moonCompute(date) {
-    var ref = Date.UTC(2000, 0, 6, 18, 14)           // a known new moon
-    var d = (date.getTime() - ref) / 86400000.0
-    var wrap = function (v, m) { return ((v % m) + m) % m }
-    var phase = wrap(d, synodicDays) / synodicDays               // 0 new, .5 full
-    var anom  = wrap(d - 2.0, anomalisticDays) / anomalisticDays // 0 at perigee
-    var dist  = 1 - 0.0549 * Math.cos(2 * Math.PI * anom)        // ~0.945 .. 1.055
-    var illum = (1 - Math.cos(2 * Math.PI * phase)) / 2
+    // `date` is a wall-clock Date in the target's frame, so it goes back onto
+    // the real timeline first: the moon is not in a time zone.
+    var T = (date.getTime() - root.tzShiftMs() - Date.UTC(2000, 0, 1, 12, 0))
+            / 86400000.0 / 36525.0
+    var D  = 297.8501921 + 445267.1114034 * T   // mean elongation
+    var M  = 357.5291092 +  35999.0502909 * T   // the sun's mean anomaly
+    var Mp = 134.9633964 + 477198.8675055 * T   // the moon's mean anomaly
+    var F  =  93.2720950 + 483202.0175233 * T   // argument of latitude
+    var sd = function (a) {
+      return Math.sin((((a % 360) + 360) % 360) * Math.PI / 180)
+    }
+    var cd = function (a) {
+      return Math.cos((((a % 360) + 360) % 360) * Math.PI / 180)
+    }
+    var cl = function (v) { return Math.max(0, Math.min(1, v)) }
+
+    // Elongation from the sun: the moon's true longitude less the sun's, which
+    // is the mean elongation plus the moon's periodic terms less the sun's
+    // equation of centre. The two-term version this replaced was out by up to
+    // fourteen hours, and contact in a solar eclipse lasts about two — so the
+    // moon has to be right to the minute or the alignment simply never happens
+    // on the day it really does. This lands within about two minutes.
+    var elong = D
+      + 6.288774 * sd(Mp)         + 1.274027 * sd(2 * D - Mp)
+      + 0.658314 * sd(2 * D)      + 0.213618 * sd(2 * Mp)
+      - 2.099718 * sd(M)          - 0.114332 * sd(2 * F)
+      + 0.058793 * sd(2 * D - 2 * Mp)  + 0.057066 * sd(2 * D - M - Mp)
+      + 0.053322 * sd(2 * D + Mp)      + 0.045758 * sd(2 * D - M)
+      - 0.040923 * sd(M - Mp)          - 0.034720 * sd(D)
+      - 0.030383 * sd(M + Mp)          + 0.015327 * sd(2 * D - 2 * F)
+      - 0.012528 * sd(Mp + 2 * F)      + 0.010980 * sd(Mp - 2 * F)
+      + 0.010675 * sd(4 * D - Mp)      + 0.010034 * sd(3 * Mp)
+      + 0.008548 * sd(4 * D - 2 * Mp)  - 0.019993 * sd(2 * M)
+    var phase = (((elong % 360) + 360) % 360) / 360.0            // 0 new, .5 full
+
+    // How far off the sun's own track it runs. The orbit is tilted about five
+    // degrees, so most new moons pass well above or below the sun and nothing
+    // happens — which is the entire reason an eclipse is rare rather than
+    // monthly, and why this cannot be faked with the phase alone.
+    var lat = 5.128122 * sd(F)
+            + 0.280602 * sd(Mp + F)      + 0.277693 * sd(Mp - F)
+            + 0.173237 * sd(2 * D - F)   + 0.055413 * sd(2 * D - Mp + F)
+            + 0.046271 * sd(2 * D - Mp - F) + 0.032573 * sd(2 * D + F)
+            + 0.017198 * sd(2 * Mp + F)  + 0.009266 * sd(2 * D + Mp - F)
+            + 0.008822 * sd(2 * Mp - F)  + 0.008216 * sd(2 * D - M - F)
+            + 0.004324 * sd(2 * D - 2 * Mp - F)
+
+    // Distance in kilometres, which is also the apparent size and therefore
+    // decides whether an eclipse is total or leaves a ring showing.
+    var rkm = 385000.56
+      - 20905.355 * cd(Mp)      - 3699.111 * cd(2 * D - Mp)
+      -  2955.968 * cd(2 * D)   -  569.925 * cd(2 * Mp)
+      +    48.888 * cd(M)       -    3.149 * cd(2 * F)
+      +   246.158 * cd(2 * D - 2 * Mp)  - 152.138 * cd(2 * D - M - Mp)
+      -   170.733 * cd(2 * D + Mp)      - 204.586 * cd(2 * D - M)
+      -   129.620 * cd(M - Mp)  +  108.743 * cd(D) + 104.755 * cd(M + Mp)
+
+    // The coincidence the whole idea of an eclipse rests on: both discs are
+    // almost exactly half a degree wide, and which one is fractionally larger
+    // changes from month to month.
+    var sdMoon = Math.asin(1737.4 / rkm) * 180 / Math.PI
+    var Rau    = 1.000140 - 0.016708 * cd(M) - 0.000139 * cd(2 * M)
+    var sdSun  = 0.2665639 / Rau
+    var ratio  = sdMoon / sdSun
+    var dist   = rkm / 385000.56
+    var illum  = (1 - Math.cos(2 * Math.PI * phase)) / 2
+
+    // Offset from the sun in solar radii, the unit the discs are drawn in.
+    var dlon = phase * 360.0
+    if (dlon > 180.0) dlon -= 360.0
+    var gx = dlon / sdSun, gy = -lat / sdSun     // north is up, uv.y runs down
+    var gR = Math.sqrt(gx * gx + gy * gy)
+
+    // Everything above is geocentric, and a solar eclipse is not: an observer
+    // stands four thousand miles off the centre of the earth and sees the moon
+    // displaced by up to its horizontal parallax, about a degree — which is
+    // twice its own width and far more than the alignment needs. That is why
+    // the geocentric separation at a *total* eclipse is around 0.9 degrees and
+    // not zero, and why treating it as zero found no eclipses at all.
+    //
+    // This scene draws the sky rather than a shadow track, so it shows what the
+    // best-placed observer would see: the separation less the parallax, floored
+    // at zero. Which puts the threshold at about 1.5 degrees of latitude, and
+    // reproduces every solar eclipse of this decade with the right kind — total
+    // in 2026 and 2027 and 2028, annular in February of 2026 and 2027 — while
+    // leaving the new moons between them alone.
+    var par = Math.asin(6378.14 / rkm) * 180 / Math.PI
+    var eff = Math.max(0, gR - par / sdSun)
+    var k   = gR > 1e-6 ? eff / gR : 0
+    var offX = gx * k, offY = gy * k
+
+    // How much of the moon's drawn position that offset accounts for. Away from
+    // conjunction it is zero and the moon keeps its ordinary place on the day's
+    // arc — which is also what forbids the stylised sky's compressed month from
+    // inventing an eclipse out of two bodies that merely look close. Contact
+    // needs about two solar radii, so a handover that begins at three cannot
+    // clip a real eclipse; the shader ignores anything under 0.55 outright, so
+    // the crossfade itself cannot manufacture a shallow false one either.
+    var blend = cl((4.5 - eff) / 1.5)
+    var solar = cl(1 - eff / (1 + ratio))
+
+    // Lunar: the same geometry against the earth's shadow, which sits exactly
+    // opposite the sun and needs no parallax correction because it is out there
+    // with the moon. The umbra is about 0.70 degrees of radius at that
+    // distance, so the moon is grazed under 0.70 + its own radius and wholly
+    // swallowed under 0.70 - it. Falling out of the geometry rather than a
+    // hand-set window, this also gets the duration right on its own: three and
+    // a half hours of shadow with an hour of totality inside it.
+    var dlF  = (phase - 0.5) * 360.0
+    var sepF = Math.sqrt(dlF * dlF + lat * lat)
+    var umbral = cl((0.70 + sdMoon - sepF) / (2 * sdMoon))
+
     // a supermoon is a full moon that also happens near perigee
     var nearFull = 1 - Math.min(1, Math.abs(phase - 0.5) / 0.055)
     var nearPeri = 1 - Math.min(1, Math.max(0, dist - 0.955) / 0.030)
-    var superness = Math.max(0, Math.min(1, nearFull * nearPeri))
-    return { phase: phase, dist: dist, illum: illum, event: superness,
+    var superness = cl(nearFull * nearPeri)
+
+    var evName = superness > 0.5 ? "Supermoon" : ""
+    if (umbral > 0.97)      evName = "Total lunar eclipse"
+    else if (umbral > 0.02) evName = "Partial lunar eclipse"
+    else if (solar > 0) {
+      // total needs the moon to be the larger disc and to clear the sun's limb
+      // all the way round; annular is the same statement with the sizes swapped
+      if (ratio >= 1.0 && eff <= ratio - 1.0)     evName = "Total solar eclipse"
+      else if (ratio < 1.0 && eff <= 1.0 - ratio) evName = "Annular solar eclipse"
+      else                                        evName = "Partial solar eclipse"
+    }
+
+    return { phase: phase, dist: dist, illum: illum, lat: lat,
+             ratio: ratio, offX: offX, offY: offY, blend: blend,
+             solar: solar, umbral: umbral,
+             // `event` decides whether inspect offers a moon panel and how much
+             // emphasis the glow gets, so an eclipse counts as one.
+             event: Math.max(superness, solar, umbral),
              name: moonName(phase),
-             eventName: superness > 0.5 ? "Supermoon" : "" }
+             eventName: evName }
   }
 
   function moonName(p) {
@@ -671,6 +1130,7 @@ Item {
   function resolveSky(todValue) {
     var hr = todValue * 24.0
     var o = { cloud: 0, rain: 0, snow: 0, storm: 0, fog: 0,
+              instab: 0, severe: 0, gust: 0,
               snowCover: 0, frozen: 0, verglas: 0, wind: 0,
               rise: 0.25, set: 0.75, flz: null,
               temp: null, cond: "", kp: null, aurora: auroraFloor, has: false }
@@ -693,16 +1153,61 @@ Item {
       o.cloud = Math.max(0, Math.min(1, lp(fc.cloud) / 100))
       o.temp  = lp(fc.temp)
 
-      // Intensity is no longer floored, so drizzle looks like drizzle.
-      // 3 mm/h reads as heavy rain, 2 cm/h as heavy snow.
-      var wetRate  = Math.max(0, Math.min(1, lp(fc.precip) / 3.0))
+      // Intensity is no longer floored, so drizzle looks like drizzle. The
+      // curve is what lets a downpour read as one: a linear 3 mm/h ceiling
+      // saturated at moderate rain, so the 8 mm/h hour of a real cell drew
+      // exactly the same rain as an ordinary wet afternoon.
+      var mmph     = Math.max(0, lp(fc.precip))
+      var wetRate  = Math.min(1, Math.pow(mmph / 8.0, 0.6))
       var snowRate = Math.max(0, Math.min(1, lp(fc.snowfall) / 2.0))
       var wA = kindWeights(fc.code[i]), wB = kindWeights(fc.code[i + 1])
       o.rain  = mixw(wA.rain,  wB.rain)  * Math.min(1, 0.12 + wetRate)
       o.snow  = mixw(wA.snow,  wB.snow)  * Math.min(1, 0.15 + snowRate)
-      o.storm = mixw(wA.storm, wB.storm) * Math.min(1, 0.35 + wetRate)
       o.fog   = mixw(wA.fog,   wB.fog)
-      if (o.storm > 0) o.rain = Math.max(o.rain, o.storm * 0.8)
+
+      // A thunderstorm is a state of the atmosphere, not a label. Toronto on
+      // 2 September is the case that made this: a storm everyone outdoors
+      // remembers, and the code said 82, "violent rain showers", so nothing in
+      // this scene treated it as a storm at all. Asked about that same hour the
+      // four global models said 82, 96, 95 and 51 — showers, thunderstorm with
+      // hail, thunderstorm, drizzle. They cannot all be right, and picking one
+      // is picking a coin toss.
+      //
+      // But every one of them put CAPE between 1450 and 2840 J/kg and the
+      // lifted index between -4.8 and -7.2. That is not a disagreement, that is
+      // a severe-thunderstorm atmosphere, and it is what the code is supposed
+      // to be a summary of. So the physics decides and the code only votes.
+      // 2200 J/kg is a strong cell and a lifted index of -6.5 is the same
+      // statement made another way; either alone is enough.
+      var cape = lp(fc.cape), li = lp(fc.li)
+      var conv = Math.max(0, Math.min(1, Math.max(cape / 2200.0, -li / 6.5)))
+      // Instability on its own is just a hot afternoon — Toronto had 2140 J/kg
+      // at 14:00 under a clear sky. Something has to actually be falling out of
+      // it before any of that is a storm you can see.
+      var derived = conv * Math.min(1, wetRate * 1.6)
+      o.storm = Math.max(mixw(wA.storm, wB.storm) * Math.min(1, 0.35 + wetRate),
+                         derived)
+      o.instab = conv
+      if (o.storm > 0) o.rain = Math.max(o.rain, o.storm * 0.85)
+
+      // The warning tier. There is no free global feed of official warnings —
+      // they are national, and stitching NWS, MeteoAlarm and Environment Canada
+      // together would be three more providers for three parts of the world. So
+      // this is the threshold rather than the bulletin: Environment Canada and
+      // the NWS both issue a severe thunderstorm warning at roughly 90 km/h
+      // gusts, and a rainfall warning around 50 mm in an hour. The gust is
+      // taken as the strongest of the hours either side, because a damaging
+      // gust is a ten-minute event that an hourly sample lands on or misses.
+      var gust = Math.max(lp(fc.gust),
+                          (fc.gust && i > 0) ? fc.gust[i - 1] : 0,
+                          (fc.gust && i + 2 < fc.gust.length) ? fc.gust[i + 2] : 0)
+      var sv = Math.max((gust - 60.0) / 40.0,
+                        (mmph - 12.0) / 25.0,
+                        ((cape - 1500.0) / 1500.0) * Math.min(1, wetRate * 2.0))
+      o.severe = Math.max(0, Math.min(1, sv)) * Math.max(o.storm, wetRate)
+      // Gustiness as distinct from wind: how much the gust exceeds the steady
+      // wind is what makes rain lash rather than slant.
+      o.gust = Math.max(0, Math.min(1, (gust - lp(fc.wspd)) / 45.0))
 
       // The height of the 0 C isotherm, which is where snow starts lying on the
       // mountains whatever it is doing down here. Not every model carries it —
@@ -736,6 +1241,11 @@ Item {
       if (tm !== null) o.frozen = Math.max(0, Math.min(1, (-2.0 - tm) / 6.0))
 
       o.cond = classifyCode(code).label
+      // If the atmosphere is holding a thunderstorm the readout should say so,
+      // whatever the code called it — otherwise the sky flashes and the line
+      // underneath it reads "Showers".
+      if (o.severe > 0.35)     o.cond = "Severe thunderstorm"
+      else if (o.storm > 0.45) o.cond = "Thunderstorm"
       o.has = true
     }
 
@@ -774,6 +1284,7 @@ Item {
   // binding read and then write the same cache, which Qt correctly reported as
   // a binding loop and which cost more than the cache ever saved.
   property var sky: ({ cloud: 0, rain: 0, snow: 0, storm: 0, fog: 0, snowCover: 0,
+                       instab: 0, severe: 0, gust: 0,
                        frozen: 0, verglas: 0, wind: 0, temp: null, cond: "",
                        kp: null, aurora: 0.12, has: false })
 
@@ -783,14 +1294,21 @@ Item {
     root.sky = o
     var m = moonAt(todToDate(scene.tod))
     scene.wx = Qt.vector4d(o.cloud, o.rain, o.snow, o.storm)
-    // apparent size swings with distance; a real event adds emphasis on top
+    // Emphasis is now glow only: the disc's size is its real size, carried by
+    // ecl.w, because two bodies that are the same size in the sky have to be
+    // the same size on the screen or neither can hide the other.
     var emphasis = (1.0 / m.dist - 1.0) * 2.0 + m.event * 0.5
-                   + (root.inspectMode === 2 ? 0.5 : 0.0)
     scene.astro = Qt.vector4d(m.phase, o.aurora, root.inspectReveal, emphasis)
+    // Where the moon is with respect to the sun, in solar radii, and how much
+    // of its drawn position that accounts for. See moonCompute().
+    scene.ecl = Qt.vector4d(m.offX, m.offY, m.blend, m.ratio)
+    scene.umbra = Qt.vector4d(m.umbral, root.inspectMode === 2 ? root.inspectReveal : 0,
+                              0, 0)
+    scene.sev = Qt.vector4d(o.instab, o.severe, 0, 0)
     // A dead-still sky looks broken rather than calm, so the drift has a floor.
     var w = o.has ? o.wind : 0.0105
     if (Math.abs(w) < 0.0025) w = 0.0025
-    scene.wx2 = Qt.vector4d(w, 0, o.fog, o.snowCover)
+    scene.wx2 = Qt.vector4d(w, o.gust, o.fog, o.snowCover)
     scene.ice = Qt.vector4d(o.frozen, o.verglas, root.todVel, 0)
     var tr = root.computeTerrain()
     scene.land = Qt.vector4d(tr.cold, tr.arid, tr.lush, tr.alpine)
@@ -839,8 +1357,11 @@ Item {
     var a = String(iso).split("T"), d = a[0].split("-"), t = (a[1] || "0:0").split(":")
     var dt = new Date(parseInt(d[0], 10), parseInt(d[1], 10) - 1, parseInt(d[2], 10),
                       parseInt(t[0], 10), parseInt(t[1] || "0", 10), 0)
-    var mid = new Date(); mid.setHours(0, 0, 0, 0)
-    return (dt.getTime() - mid.getTime()) / 3600000.0
+    // Both sides are in the target's wall clock: the ISO string because the
+    // forecast was fetched with timezone=auto, and midnight because it is
+    // taken there too. Measuring one against the machine's midnight is what
+    // offset the whole 23-day window by the difference between the two zones.
+    return (dt.getTime() - root.midnightAtLoc().getTime()) / 3600000.0
   }
 
   // "2026-08-30T05:59" -> 0.2493, a fraction of the local day. The forecast is
@@ -871,10 +1392,21 @@ Item {
     return { rise: rise, set: set }
   }
 
-  function hoursFromMidnightUtc(iso) {        // NOAA time_tag, UTC, no suffix
-    var dt = new Date(String(iso).replace(" ", "T") + "Z")
-    var mid = new Date(); mid.setHours(0, 0, 0, 0)
-    return (dt.getTime() - mid.getTime()) / 3600000.0
+  // NOAA time_tag is a real instant in UTC. Kp is a global number, but *when*
+  // it applies is local — so the instants are kept and the hours derived from
+  // them, rather than baked in at parse time. Baking them in meant a reply that
+  // arrived before the forecast was measured against the zone we were leaving,
+  // and an eight-hour error puts the aurora on the wrong side of the night.
+  function epochOfUtc(iso) {
+    return new Date(String(iso).replace(" ", "T") + "Z").getTime()
+  }
+  function rebuildKpHours() {
+    if (!kp || !kp.ms) return
+    var mid = root.midnightAtLoc().getTime(), sh = root.tzShiftMs()
+    var h = []
+    for (var i = 0; i < kp.ms.length; i++)
+      h.push((kp.ms[i] + sh - mid) / 3600000.0)
+    root.kp = { ms: kp.ms, vals: kp.vals, hrs: h }
   }
 
   function refreshSky(force) {
@@ -921,12 +1453,17 @@ Item {
 
   function fetchForecast() {
     if (!loc || fcProc.running) return
+    root.beginFetch(fcProc)
     fcProc.command = root.curlCmd(10, root.capForecast,
       "https://api.open-meteo.com/v1/forecast"
       + "?latitude=" + loc.lat + "&longitude=" + loc.lon
       + "&hourly=weather_code,precipitation,cloud_cover,temperature_2m"
       + ",snowfall,snow_depth,soil_temperature_0cm,wind_speed_10m,wind_direction_10m"
       + ",freezing_level_height"
+      // What a forecaster actually looks at to call a thunderstorm. See the
+      // note in resolveSky(): the weather code is the one field the models
+      // disagree about, and these three are the ones they agree on.
+      + ",cape,lifted_index,wind_gusts_10m"
       + "&daily=sunrise,sunset,daylight_duration"
       + "&past_days=7&forecast_days=16&timezone=auto")   // 16 is the API max
     fcProc.running = true
@@ -941,6 +1478,7 @@ Item {
   // Zermatt 0.89, Montreal 1.20 — which is exactly the right order.
   function fetchClimate() {
     if (!loc || climProc.running) return
+    root.beginFetch(climProc)
     // the archive runs a few days behind live, so end a week back
     var end = new Date(Date.now() - 7 * 86400000)
     var start = new Date(end.getTime() - 365 * 86400000)
@@ -1019,6 +1557,7 @@ Item {
 
   function fetchHorizon() {
     if (!loc || elevProc.running) return
+    root.beginFetch(elevProc)
     var la = [loc.lat.toFixed(4)], lo = [loc.lon.toFixed(4)]
     for (var k = 0; k < root.hzAz; k++) {
       var az = 360.0 * k / root.hzAz
@@ -1049,6 +1588,7 @@ Item {
   // is a view across water toward land, and standing anywhere else fights it.
   function fetchHorizonFan(vx, vy, centreAz, rings) {
     if (!loc || fanProc.running) return
+    root.beginFetch(fanProc)
     var vd = Math.sqrt(vx * vx + vy * vy)
     var vlat = loc.lat, vlon = loc.lon
     if (vd > 1.0) {
@@ -1098,6 +1638,7 @@ Item {
 
   function fetchNearField() {
     if (!loc || nearProc.running) return
+    root.beginFetch(nearProc)
     var la = [], lo = []
     for (var i = 0; i < root.nearN; i++) {
       for (var j = 0; j < root.nearN; j++) {
@@ -1137,6 +1678,7 @@ Item {
 
   function fetchKp() {
     if (kpProc.running) return
+    root.beginFetch(kpProc)
     kpProc.running = true
   }
 
@@ -1161,7 +1703,10 @@ Item {
     var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
                     ring: ring, elevation: elevation, climate: climate,
                     horizon: horizon, hzH0: hzH0, water: water,
-                    chosen: chosenLoc }
+                    chosen: chosenLoc,
+                    // without this the cached hours are read against the wrong
+                    // midnight for as long as it takes the first fetch to land
+                    tz: tzOffset, tzn: tzName }
     var b64 = Qt.btoa(JSON.stringify(payload))
     if (b64.length > root.capCache) return   // never write what we would refuse to read
     // Concurrent saves are coalesced rather than raced: a write already in
@@ -1221,18 +1766,33 @@ Item {
 
   // One definition of "a usable forecast", so the cache cannot install a shape
   // the network path would have refused.
+  // A cache file is as untrusted as a reply, and it feeds exactly the same
+  // indexing, arithmetic and uniforms — so it gets exactly the same ranges the
+  // network path applies rather than a count and the benefit of the doubt.
+  readonly property var fcRanges: [
+    ["code",      0, 99], ["precip", 0, 1000], ["cloud", 0, 100],
+    ["temp",   -120, 80], ["snowfall", 0, 500], ["depth", 0, 100],
+    ["soil",  -120, 100], ["wspd",   0,  500], ["wdir",  0, 360]]
+
   function validFc(f) {
     if (!f || typeof f !== "object") return null
-    var keys = ["code","precip","cloud","temp","snowfall","depth","soil","wspd","wdir"]
     var n = -1
-    for (var i = 0; i < keys.length; i++) {
-      var a = root.capArray(f[keys[i]], root.maxSeries)
+    for (var i = 0; i < root.fcRanges.length; i++) {
+      var r = root.fcRanges[i]
+      var a = root.numArray(f[r[0]], root.maxSeries, r[1], r[2], true)
       if (!a || a.length < 2) return null
       if (n < 0) n = a.length
       else if (a.length !== n) return null
     }
-    if (f.flz !== null && f.flz !== undefined) {
-      var z = root.capArray(f.flz, root.maxSeries)
+    // Optional series: absent is normal — freezing level is missing at some
+    // places, and the convective fields are simply not in a cache written
+    // before they were fetched. Present and malformed is not normal.
+    var opt = [["flz", -1000, 30000], ["cape", -2000, 20000],
+               ["li", -40, 60], ["gust", 0, 500]]
+    for (var k = 0; k < opt.length; k++) {
+      var o = opt[k]
+      if (f[o[0]] === null || f[o[0]] === undefined) continue
+      var z = root.numArray(f[o[0]], root.maxSeries, o[1], o[2], true)
       if (!z || z.length !== n) return null
     }
     if (root.finiteIn(f.t0, -100000, 100000) === null) return null
@@ -1261,12 +1821,20 @@ Item {
       // dropped rather than kept if it fails.
       if (c.chosen && !root.configLoc) root.chosenLoc = root.validLoc(c.chosen)
       loc = c.loc
+      // Restored before fc, for the same reason the network path sets it
+      // first: t0 was measured against this zone's midnight.
+      var ctz = root.finiteIn(c.tz, -50400, 50400)
+      if (ctz !== null) { root.tzOffset = ctz; root.tzName = root.capStr(c.tzn, 12) }
       // Series are re-checked exactly as they are on arrival from the network,
       // because a file can be edited and a cached fc feeds the same indexing.
       fc = root.validFc(c.fc)
-      kp = (c.kp && root.capArray(c.kp.hrs, root.maxDaily)
-                 && root.capArray(c.kp.vals, root.maxDaily)
-                 && c.kp.hrs.length === c.kp.vals.length) ? c.kp : null
+      // Instants, not hours: a cache written under another zone would
+      // otherwise restore that zone's idea of when tonight is.
+      kp = (c.kp && root.numArray(c.kp.ms, root.maxDaily, 0, 4102444800000, false)
+                 && root.numArray(c.kp.vals, root.maxDaily, 0, 9, false)
+                 && c.kp.ms.length === c.kp.vals.length)
+         ? { ms: c.kp.ms, vals: c.kp.vals, hrs: [] } : null
+      root.rebuildKpHours()
       ring = (c.ring && root.finiteIn(c.ring.spread, 0, 9000) !== null
                      && root.finiteIn(c.ring.sea, 0, 1) !== null) ? c.ring : null
       elevation = root.finiteIn(c.elevation, -500, 9000) || 0
@@ -1290,9 +1858,7 @@ Item {
   }
 
   function todToDate(todValue) {
-    var d = new Date()
-    d.setHours(0, 0, 0, 0)
-    return new Date(d.getTime() + todValue * 86400000)
+    return new Date(root.midnightAtLoc().getTime() + todValue * 86400000)
   }
 
   property var slotIds: [-1, -1, -1]
@@ -1453,9 +2019,11 @@ Item {
 
   Process {
     id: nearProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(nearProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
@@ -1546,9 +2114,11 @@ Item {
 
   Process {
     id: fanProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(fanProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
@@ -1634,9 +2204,11 @@ Item {
 
   Process {
     id: fcProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(fcProc)) return   // a reply for a place we have left
         try {
           var j = root.boundedParse(text, root.capForecast)
           if (!j) return
@@ -1670,8 +2242,15 @@ Item {
           var soil  = series(h.soil_temperature_0cm, -120, 100, true)
           var wspd  = series(h.wind_speed_10m, 0, 500, true)
           var wdir  = series(h.wind_direction_10m, 0, 360, true)
+          // CAPE is an energy per unit mass and 20 kJ/kg is past anything the
+          // atmosphere does; the lifted index is a temperature difference and
+          // goes negative when the air is unstable, which is the whole point
+          // of it. Both come back negative sometimes, so neither is floored.
+          var cape  = series(h.cape, -2000, 20000, true)
+          var li    = series(h.lifted_index, -40, 60, true)
+          var gust  = series(h.wind_gusts_10m, 0, 500, true)
           if (!code || !precip || !cloud || !temp || !snowf || !depth
-              || !soil || !wspd || !wdir) return
+              || !soil || !wspd || !wdir || !cape || !li || !gust) return
           // Absent at some locations — Tromso sends nulls throughout — so a
           // missing series is expected, but a present-and-malformed one is not.
           var flz = null
@@ -1681,6 +2260,17 @@ Item {
           }
 
           root.elevation = root.finiteIn(j.elevation, -500, 9000) || 0
+
+          // The zone has to be set BEFORE the hours are measured against it:
+          // t0 is the first sample's distance from the target's midnight, and
+          // taking it against the old zone's midnight would shift the entire
+          // 23-day window by the difference. Fourteen hours is not a rounding
+          // error, it is night for day.
+          var off = root.finiteIn(j.utc_offset_seconds, -50400, 50400)
+          var moved = (off !== null && off !== root.tzOffset)
+          if (off !== null) root.tzOffset = off
+          root.tzName = root.capStr(j.timezone_abbreviation, 12)
+
           var sr = root.parseDaylight(j.daily)
           root.fc = { t0: root.hoursFromMidnightLocal(t[0]),
                       code: code, precip: precip,
@@ -1688,9 +2278,26 @@ Item {
                       snowfall: snowf, depth: depth,
                       soil: soil,
                       wspd: wspd, wdir: wdir,
+                      cape: cape, li: li, gust: gust,
                       flz: flz,
                       rise: sr.rise, set: sr.set }
-          root.pushSky(); root.saveCache()
+          // Kp's hours are measured against the target's midnight, and the
+          // target may only just have changed.
+          root.rebuildKpHours()
+
+          // Re-seeding the clock is onTzOffsetChanged's job above, and it has
+          // already run if the offset moved. What is left here is the case it
+          // cannot see: the same offset, but a place we had marked as not yet
+          // answered for — and the date, if one was typed with the place.
+          var wasStale = root.tzStale
+          root.tzStale = false
+          if (root.pendingWhen) root.applyWhen()
+          else if (wasStale && !moved && root.opened && !root.scrubbing
+                   && !root.todReturning && !root.pinned
+                   && root.inspectMode === 0)
+            root.syncTimeOfDay()
+          if (wasStale) { root.notice = true; noticeTimer.restart() }
+          root.pushSky(); root.refreshReadout(); root.saveCache()
         } catch (e) {}
       }
     }
@@ -1698,6 +2305,7 @@ Item {
 
   Process {
     id: kpProc
+    property int gen: 0
     command: root.curlCmd(8, root.capKp,
       "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json")
     stdout: StdioCollector {
@@ -1717,14 +2325,15 @@ Item {
             if (typeof row.time_tag !== "string" || row.time_tag.length > 40) return
             if (root.finiteIn(row.kp, 0, 9) === null) return
           }
-          var hrs = [], vals = []
+          var ms = [], vals = []
           for (var i = 0; i < arr.length; i++) {
             var e = arr[i]
             if (!e || e.kp === undefined || e.kp === null) continue
-            hrs.push(root.hoursFromMidnightUtc(e.time_tag))
+            ms.push(root.epochOfUtc(e.time_tag))
             vals.push(parseFloat(e.kp))
           }
-          root.kp = { hrs: hrs, vals: vals }
+          root.kp = { ms: ms, vals: vals, hrs: [] }
+          root.rebuildKpHours()
           root.pushSky(); root.saveCache()
         } catch (e) {}
       }
@@ -1733,9 +2342,11 @@ Item {
 
   Process {
     id: climProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(climProc)) return   // a reply for a place we have left
         try {
           var cj = root.boundedParse(text, root.capClimate)
           var d = cj && cj.daily
@@ -1763,9 +2374,11 @@ Item {
 
   Process {
     id: elevProc
+    property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stale(elevProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
@@ -1828,9 +2441,9 @@ Item {
         try {
           var gj = root.boundedParse(text, root.capGeocode)
           var gr = gj && root.capArray(gj.results, 32)
-          if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.searchNote = "Nothing found" } return }
+          if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchNote = "Nothing found" } return }
           var r = root.validLoc(gr[0])
-          if (!r) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.searchNote = "Nothing found" } return }
+          if (!r) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchNote = "Nothing found" } return }
           // validLoc has already canonicalised the coordinates and capped the
           // strings, so this is the sanitised object, not the reply.
           var nl = r
@@ -1851,6 +2464,7 @@ Item {
           if (root.geoForSearch) {
             // say so rather than silently going somewhere else
             root.geoForSearch = false
+            root.pendingWhen = null
             root.searchNote = "No such place"
           } else if (!locProc.running) locProc.running = true
         }
@@ -1975,6 +2589,15 @@ Item {
       // near bank, wave scale, mirror compression. The default is a lake,
       // which is what the scene drew everywhere before any of this.
       property vector4d shore: Qt.vector4d(0.965, 1.0, 3.2, 0)
+      // Moon against sun: offset in solar radii, how much of the moon's
+      // position that offset accounts for, and the ratio of the two radii.
+      // The default blend of 0 is "no override", which is every moment that is
+      // not within a couple of hours of a new moon.
+      property vector4d ecl: Qt.vector4d(0, 0, 0, root.moonSunMean)
+      // shadow depth, inspect zoom
+      property vector4d umbra: Qt.vector4d(0, 0, 0, 0)
+      // convective instability, warning tier
+      property vector4d sev: Qt.vector4d(0, 0, 0, 0)
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.
@@ -2041,6 +2664,7 @@ Item {
         if (touchArea.activeCount >= 1 && touchArea.gestureMoved) root.cycleInspect()
         root.todReturning = false
         root.drifting = false
+        root.pinned = false
         readoutHideTimer.stop()
         touchArea.activeCount += points.length
         touchArea.gestureMaxPoints = Math.max(touchArea.gestureMaxPoints, touchArea.activeCount)
@@ -2162,7 +2786,8 @@ Item {
       spacing: parent.height * 0.008
       // Kept visible while parked away from the present, so a held forecast
       // always says which moment you are looking at.
-      opacity: (root.scrubbing || root.inspectMode > 0) ? 1
+      opacity: (root.scrubbing || root.inspectMode > 0 || root.pinned) ? 1
+             : root.notice ? 0.92
              : root.awayFromNow ? 0.78 : 0
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
@@ -2219,7 +2844,8 @@ Item {
       anchors.bottomMargin: parent.height * 0.036
       width: parent.width * 0.52
       height: Math.max(3, parent.height * 0.0042)
-      opacity: (root.scrubbing || root.inspectMode > 0 || root.awayFromNow) ? 0.72 : 0
+      opacity: (root.scrubbing || root.inspectMode > 0 || root.pinned
+                || root.notice || root.awayFromNow) ? 0.72 : 0
       visible: opacity > 0.01
       Behavior on opacity { NumberAnimation { duration: 280 } }
 
@@ -2231,7 +2857,11 @@ Item {
       Connections {
         target: scene
         function onTodChanged() {
-          if (root.scrubbing || root.inspectMode > 0) {
+          // Also while parked or announcing: a jump to a typed date is
+          // animated, and without this the line kept whatever time it read as
+          // the animation set off rather than the one it arrived at.
+          if (root.scrubbing || root.inspectMode > 0
+              || root.pinned || root.notice) {
             strip.centre = scene.tod
             root.refreshReadout()
           }
@@ -2350,15 +2980,17 @@ Item {
           // checkable by grep rather than by reading each binding.
           textFormat: Text.PlainText
           anchors.horizontalCenter: parent.horizontalCenter
-          color: root.searchNote === "No such place" ? "#e8a37c" : "#eaf0f8"
+          color: root.searchFailed ? "#e8a37c" : "#eaf0f8"
           opacity: 0.62
           font.pixelSize: Math.max(11, root.sceneH * 0.0155)
           horizontalAlignment: Text.AlignHCenter
           text: root.searchNote !== "" ? root.searchNote
               : (root.chosenLoc
-                 ? "Enter to go  \u00b7  empty Enter follows this machine again"
+                 ? "A place, a moment, or both: Istanbul @ tomorrow 15:00"
+                   + "  \u00b7  empty Enter follows this machine again"
                    + "  \u00b7  Esc to cancel"
-                 : "Enter to go  \u00b7  Esc to cancel")
+                 : "A place, a moment, or both: Istanbul @ tomorrow 15:00"
+                   + "  \u00b7  Esc to cancel")
         }
       }
     }
@@ -2379,7 +3011,7 @@ Item {
             root.searchText = root.searchText.slice(0, -1)
             root.searchNote = ""
           } else if (event.text && event.text.length === 1
-                     && event.text >= " " && root.searchText.length < 40) {
+                     && event.text >= " " && root.searchText.length < 60) {
             root.searchText += event.text
             root.searchNote = ""
           }

@@ -12,8 +12,9 @@ Borealis Atlas is what came of asking. It is a touchscreen sky and weather
 explorer built on his aurora: today's real forecast, the sun rising and setting
 when it really does, the horizon measured from the terrain around you, snow
 lying above the freezing level, and the aurora at whatever the solar wind is
-doing tonight. Drag a finger across the screen and time moves — seven days
-back, sixteen forward.
+doing tonight. Look at somewhere else and you get its clock too — Istanbul at
+its own hour, not yours. Drag a finger across the screen and time moves — seven
+days back, sixteen forward.
 
 Still 100% procedural. Still one fragment shader, still no image assets. That
 was his idea and it is worth keeping.
@@ -53,6 +54,15 @@ Montreal, at its own true sunrise and sunset for that date.
 | ![Fog](docs/media/weather-fog.jpg) | ![Snow](docs/media/weather-snow.jpg) |
 | **Fog** — Montreal, 31 August, 08:00. The forecast said fog for that hour, so the scene is fogged. | **Snow** — Ushuaia, 12 September. Snow showers at 4.8 °C over 7 cm of lying snow, which is why the ground is white and the air is not clear. |
 
+A thunderstorm is read from the state of the atmosphere rather than from the
+weather code, because the codes disagree and the physics does not. On the
+Toronto storm of 2 September the four global models called that hour violent
+showers, showers, thunderstorm and drizzle — and all four put CAPE between 1770
+and 2690 J/kg, which is a severe-thunderstorm atmosphere whatever it is
+labelled. Past the tier the weather services
+use for a severe thunderstorm warning, the deck drops and goes green-black, the
+rain turns into a curtain and the lightning gets a channel you can see.
+
 ### Places that look like themselves
 
 | | |
@@ -67,6 +77,16 @@ Montreal, at its own true sunrise and sunset for that date.
 Same overlay, three different dates. The phase is arithmetic, not a picture.
 
 ![Moon phases: full, waning gibbous, last quarter](docs/media/moon-phases.jpg)
+
+The sun and the moon are drawn the same size, because in a real sky they are:
+both are almost exactly half a degree wide, and that coincidence is the only
+reason an eclipse is a thing that can happen at all. So it happens here. The
+moon's position comes from the same series as its phase, including the tilt of
+its orbit — which is why an eclipse is rare rather than monthly — and its
+distance decides whether you get a corona or a ring of sun left showing.
+Checked against every solar and lunar eclipse from 2026 to 2028: each one lands
+on the right day, with the right kind, and the new moons in between pass by
+without incident.
 
 ### Five palettes, all of them his
 
@@ -119,6 +139,10 @@ before you leave it running on battery.
 
 ## Use
 
+**`SUPER + ALT + B`** summons it, once you have bound it as above. It is an
+overlay, so it sits over whatever you were doing and gets out of the way again
+on any key or a quick tap.
+
 | Gesture | What happens |
 |---|---|
 | Drag left or right | Move through time — 7 days back, 16 forward |
@@ -126,8 +150,31 @@ before you leave it running on battery.
 | Quick tap | Dismiss |
 | Two-finger tap | Next palette |
 | Press and hold, or drag | Play with the aurora — no dismiss |
-| `/` | Type a place to look at |
+| `/` | Go to a place, a moment, or both |
 | Any other key | Dismiss |
+
+### `/` — a place, a moment, or both
+
+```
+Istanbul                  the place, at its own local hour
+Istanbul @ tomorrow 15:00 both
+Quito, 12 Sep             a comma works as well as an @
+sunset                    a moment here, without moving
++3        yesterday 15:00        2026-09-12 6:30        friday 3pm
+```
+
+Either half alone is fine. With no separator the line is taken as a moment only
+if it plainly is one — it has a digit in it, or it is a word like `tomorrow` —
+so `March`, `Sunday` and `New York` still look for towns. Empty Enter follows
+this machine again.
+
+A moment you asked for holds the sky still, because a date you typed is a
+question and not ambience; touching the screen hands it back to the clock.
+
+**The clock is the place's, not yours.** Go to Istanbul from Montreal and you
+get Istanbul's afternoon, not your morning — the forecast was always in local
+hours, and now the sun is too. The readout names the zone whenever it differs
+from your own.
 
 Up to three fingers at once. A finger is a repulsor in the aurora rather than a
 light drawn on top of it: the curtains are sampled *through* the field, so light
