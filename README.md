@@ -139,6 +139,10 @@ before you leave it running on battery.
 
 ## Use
 
+**`SUPER + ALT + B`** summons it, once you have bound it as above. It is an
+overlay, so it sits over whatever you were doing and gets out of the way again
+on any key or a quick tap.
+
 | Gesture | What happens |
 |---|---|
 | Drag left or right | Move through time — 7 days back, 16 forward |
@@ -146,8 +150,31 @@ before you leave it running on battery.
 | Quick tap | Dismiss |
 | Two-finger tap | Next palette |
 | Press and hold, or drag | Play with the aurora — no dismiss |
-| `/` | Type a place to look at |
+| `/` | Go to a place, a moment, or both |
 | Any other key | Dismiss |
+
+### `/` — a place, a moment, or both
+
+```
+Istanbul                  the place, at its own local hour
+Istanbul @ tomorrow 15:00 both
+Quito, 12 Sep             a comma works as well as an @
+sunset                    a moment here, without moving
++3        yesterday 15:00        2026-09-12 6:30        friday 3pm
+```
+
+Either half alone is fine. With no separator the line is taken as a moment only
+if it plainly is one — it has a digit in it, or it is a word like `tomorrow` —
+so `March`, `Sunday` and `New York` still look for towns. Empty Enter follows
+this machine again.
+
+A moment you asked for holds the sky still, because a date you typed is a
+question and not ambience; touching the screen hands it back to the clock.
+
+**The clock is the place's, not yours.** Go to Istanbul from Montreal and you
+get Istanbul's afternoon, not your morning — the forecast was always in local
+hours, and now the sun is too. The readout names the zone whenever it differs
+from your own.
 
 Up to three fingers at once. A finger is a repulsor in the aurora rather than a
 light drawn on top of it: the curtains are sampled *through* the field, so light
