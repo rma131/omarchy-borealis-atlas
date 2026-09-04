@@ -383,6 +383,10 @@ Item {
     root.searching = true
     root.searchText = ""
     root.searchFailed = false; root.searchNote = ""
+    root.suggestBudget = 8
+    root.suggestFor = ""
+    root.suggestPick = null
+    root.clearSuggestions()
   }
 
   // ---- "when": a date, a time, or both -------------------------------------
@@ -527,6 +531,132 @@ Item {
     root.refreshReadout()
   }
 
+  // ---- suggestions ----------------------------------------------------------
+  // Typing a place blind and hoping the geocoder agrees with you is how
+  // "Cyprus" ends up being a mountain. The list says what it is about to pick
+  // before you commit to it, and an accepted suggestion carries its own
+  // coordinates — so a search that used to spend a geocode on submit now
+  // spends none, and the suggestions themselves are budgeted and debounced.
+  property var suggestions: []
+  property int suggestIndex: -1
+  property var suggestPick: null          // coordinates already in hand
+  property int suggestGen: 0
+  property int suggestBudget: 8           // per opening of the search box
+  property string suggestFor: ""          // the place text the list is for
+  property var geoMemo: ({})              // query -> rows, this session
+  property var geoEmpty: ({})             // prefixes known to match nothing
+
+  // A lenient splitter, for suggesting only. splitQuery() cannot be reused:
+  // its comma branch requires parseWhen() to succeed, and a half-typed "tomo"
+  // never does.
+  function suggestSplit(q) {
+    var at = q.lastIndexOf("@")
+    if (at >= 0) return { place: q.substring(0, at).trim(),
+                          when: q.substring(at + 1).trim(), inWhen: true }
+    var c = q.lastIndexOf(",")
+    if (c >= 0) return { place: q.substring(0, c).trim(),
+                         when: q.substring(c + 1).trim(), inWhen: true }
+    return { place: q.trim(), when: "", inWhen: false }
+  }
+
+  readonly property var weekdayFull: ["sunday","monday","tuesday","wednesday",
+                                      "thursday","friday","saturday"]
+
+  // Moments cost nothing: generated here and then run through the same parser
+  // that will have to accept them, so a suggestion can never be something
+  // submitSearch() then refuses.
+  function whenSuggestions(w) {
+    var cand = [], i
+    var lw = String(w).toLowerCase()
+    if (!lw.length) {
+      cand = ["today", "tomorrow", "tonight", "sunrise", "sunset", "+3"]
+    } else {
+      for (i = 0; i < root.plainMoments.length; i++)
+        if (root.plainMoments[i].substring(0, lw.length) === lw)
+          cand.push(root.plainMoments[i])
+      for (i = 0; i < root.weekdayFull.length; i++)
+        if (root.weekdayFull[i].substring(0, lw.length) === lw)
+          cand.push(root.weekdayFull[i])
+      if (/^[+-]$/.test(lw)) cand = cand.concat([lw + "1", lw + "2", lw + "3", lw + "7"])
+      if (/^[+-]\d+$/.test(lw)) cand.push(lw)
+      if (/^\d{1,2}$/.test(lw))
+        cand = cand.concat([lw + ":00", lw + "am", lw + "pm", lw + "h"])
+    }
+    var out = []
+    for (i = 0; i < cand.length && out.length < 6; i++)
+      if (root.parseWhen(cand[i]))
+        out.push({ kind: "when", text: cand[i], sub: "" })
+    return out
+  }
+
+  function clearSuggestions() {
+    root.suggestions = []
+    root.suggestIndex = -1
+  }
+
+  Timer { id: suggestDelay; interval: 320; onTriggered: root.askSuggestions() }
+
+  // Debounced, floored at three characters, and skipped when the text has not
+  // changed — backspacing into a word and out again must not re-ask.
+  function scheduleSuggestions() {
+    if (!root.searching) { root.clearSuggestions(); return }
+    var q = root.suggestSplit(root.searchText)
+    if (q.inWhen) {
+      suggestDelay.stop()
+      root.suggestions = root.whenSuggestions(q.when)
+      root.suggestIndex = -1
+      return
+    }
+    if (q.place.length < 3) { suggestDelay.stop(); root.clearSuggestions(); return }
+    suggestDelay.restart()
+  }
+
+  function askSuggestions() {
+    var q = root.suggestSplit(root.searchText)
+    var key = q.place.toLowerCase()
+    if (q.inWhen || key.length < 3) return
+    if (key === root.suggestFor) return
+    if (root.heldBack()) return
+    // A shorter prefix that matched nothing means nothing longer can match.
+    for (var k in root.geoEmpty)
+      if (Object.prototype.hasOwnProperty.call(root.geoEmpty, k)
+          && key.substring(0, k.length) === k) return
+    root.suggestFor = key
+    if (Object.prototype.hasOwnProperty.call(root.geoMemo, key)) {
+      root.suggestions = root.geoMemo[key]
+      root.suggestIndex = -1
+      return
+    }
+    if (root.suggestBudget <= 0) return
+    root.suggestBudget--
+    root.suggestGen++
+    if (suggestProc.running) return          // its own exit re-fires
+    root.runSuggest(key)
+  }
+
+  function runSuggest(key) {
+    suggestProc.gen = root.suggestGen
+    suggestProc.q = key
+    suggestProc.command = root.curlCmd(6, root.capGeocode,
+      "https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name="
+      + encodeURIComponent(key))
+    suggestProc.running = true
+  }
+
+  function acceptSuggestion(i) {
+    var sg = root.suggestions[i]
+    if (!sg) return
+    var q = root.suggestSplit(root.searchText)
+    if (sg.kind === "place") {
+      root.searchText = sg.text + (q.when.length ? " @ " + q.when : "")
+      root.suggestPick = sg.loc          // already through validLoc
+      root.suggestFor = sg.text.toLowerCase()
+    } else {
+      root.searchText = (q.place.length ? q.place + " @ " : "") + sg.text
+    }
+    root.clearSuggestions()
+  }
+
   function submitSearch() {
     var raw = root.searchText.trim()
     if (raw.length === 0) {        // empty means "wherever this machine is"
@@ -561,6 +691,22 @@ Item {
       return
     }
     root.pendingWhen = when        // applied when that place's forecast lands
+    // A suggestion was accepted and the text still matches it, so its
+    // coordinates are already in hand and canonicalised.
+    if (root.suggestPick && root.suggestPick.name
+        && root.suggestPick.name.toLowerCase() === q.place.toLowerCase()) {
+      var picked = root.suggestPick
+      root.suggestPick = null
+      root.searching = false
+      root.searchFailed = false; root.searchNote = ""
+      root.clearSuggestions()
+      root.chosenLoc = picked
+      root.loc = picked
+      root.fetchForecast(); root.fetchKp(); root.fetchHorizon(); root.fetchClimate()
+          root.fetchMarine()
+      root.saveCache()
+      return
+    }
     root.searchFailed = false; root.searchNote = "Looking for " + q.place + "…"
     root.geoForSearch = true
     geocode(q.place)
@@ -2918,6 +3064,61 @@ Item {
 
   // Same geocoder Omarchy's weather panel uses, so no new service is involved.
   Process {
+    id: suggestProc
+    property int gen: 0
+    property string q: ""
+    property string src: "geocode"
+    property bool ok: false
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: suggestProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(suggestProc.src, code, suggestProc.errText, suggestProc.ok)
+      suggestProc.ok = false; suggestProc.errText = ""
+      // The text moved on while this was in flight; ask for what it says now.
+      if (root.searching && suggestProc.gen !== root.suggestGen
+          && root.suggestBudget > 0) {
+        var q2 = root.suggestSplit(root.searchText)
+        if (!q2.inWhen && q2.place.length >= 3) root.runSuggest(q2.place.toLowerCase())
+      }
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var gj = root.boundedParse(text, root.capGeocode)
+          if (gj) suggestProc.ok = true
+          // A reply for text the user has already typed past is not late data,
+          // it is the wrong list — the same rule the location fetches follow.
+          if (suggestProc.gen !== root.suggestGen) return
+          var gr = gj && root.capArray(gj.results, 32)
+          if (!gr || !gr.length) {
+            root.geoEmpty[suggestProc.q] = true
+            root.clearSuggestions()
+            return
+          }
+          var rows = []
+          for (var i = 0; i < gr.length && rows.length < 5; i++) {
+            var v = root.validLoc(gr[i])
+            if (!v || !v.name) continue
+            // admin1 disambiguates the five different Springfields, which is
+            // most of the reason for showing a list at all.
+            var a1 = root.capStr(gr[i].admin1, root.maxStrLen)
+            var sub = a1 && a1 !== v.name
+                    ? (v.country ? a1 + ", " + v.country : a1)
+                    : v.country
+            rows.push({ kind: "place", text: v.name, sub: sub, loc: v })
+          }
+          if (!rows.length) { root.clearSuggestions(); return }
+          root.geoMemo[suggestProc.q] = rows
+          root.suggestions = rows
+          root.suggestIndex = -1
+        } catch (e) { root.clearSuggestions() }
+      }
+    }
+  }
+
+  Process {
     id: marineProc
     property int gen: 0
     property string src: "marine"
@@ -3368,6 +3569,7 @@ Item {
     }
 
     Column {
+      id: readoutCol
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
       anchors.bottomMargin: parent.height * 0.075
@@ -3397,6 +3599,7 @@ Item {
 
     // the day being explored, quieter than the line above it
     Text {
+      id: placeLine
       // Anything rendered here can carry API- or user-supplied text, and AutoText would
       // interpret it as markup. Set on every Text without exception, so the rule is
       // checkable by grep rather than by reading each binding.
@@ -3421,6 +3624,28 @@ Item {
       }
     }
 
+    }
+
+    // Where on earth this is. Anchored to the place line's own text width and
+    // not to the Column, which is as wide as the screen — and sharing the
+    // Column's opacity so there is one rule for when the caption is up rather
+    // than two that can drift apart.
+    Globe {
+      id: globe
+      readonly property real side: Math.max(44, root.sceneH * 0.078)
+      width: side
+      height: side
+      place: root.loc
+      // Positioned by binding rather than by anchor: placeLine lives inside the
+      // Column, and an anchor may only name a parent or a sibling. A binding
+      // across the tree is fine, and this way the Column's own layout is left
+      // completely alone.
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.horizontalCenterOffset:
+        -(placeLine.contentWidth / 2 + side * 0.72)
+      y: readoutCol.y + placeLine.y + placeLine.height / 2 - side / 2
+      opacity: readoutCol.opacity
+      visible: opacity > 0.01
     }
 
     // A day has a shape, and scrubbing hour by hour never showed it. The strip
@@ -3514,7 +3739,11 @@ Item {
       z: 40
       visible: opacity > 0.01
       opacity: root.searching ? 1 : 0
-      enabled: false                       // keys only; it takes no pointer
+      // Takes pointer input only while it is actually up. At opacity 0 it must
+      // stay transparent to touch, or it would eat every gesture on the panel;
+      // while it is up, the sky underneath should be inert anyway, because a
+      // modal search is not a thing you scrub behind.
+      enabled: root.searching
       Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
       Rectangle { anchors.fill: parent; color: "#070b14"; opacity: 0.55 }
@@ -3563,6 +3792,53 @@ Item {
           }
         }
 
+        // At most five places or six moments, so there is nothing to
+        // virtualise and a plain array is a perfectly good Repeater model.
+        Column {
+          anchors.horizontalCenter: parent.horizontalCenter
+          spacing: root.sceneH * 0.004
+          visible: root.suggestions.length > 0
+          Repeater {
+            model: root.suggestions
+            Rectangle {
+              width: Math.max(root.sceneH * 0.42,
+                              label.contentWidth + root.sceneH * 0.05)
+              height: label.height + root.sceneH * 0.018
+              radius: root.sceneH * 0.005
+              color: index === root.suggestIndex ? "#0d1a2e" : "transparent"
+              border.color: index === root.suggestIndex ? "#2a4460" : "transparent"
+              border.width: 1
+              Text {
+                id: label
+                // Place names come straight from the geocoder, so this is
+                // exactly the binding the PlainText rule exists for.
+                textFormat: Text.PlainText
+                anchors.centerIn: parent
+                color: "#eaf0f8"
+                opacity: index === root.suggestIndex ? 1.0 : 0.66
+                font.pixelSize: Math.max(13, root.sceneH * 0.021)
+                text: modelData.text
+                    + (modelData.sub ? "   \u00b7   " + modelData.sub : "")
+              }
+              // A touchscreen is the point of this, so the rows take a touch.
+              // MultiPointTouchArea rather than MouseArea, matching the rest
+              // of the file: it does not depend on the compositor synthesising
+              // mouse events from the digitiser.
+              MultiPointTouchArea {
+                anchors.fill: parent
+                maximumTouchPoints: 1
+                mouseEnabled: true
+                onPressed: {
+                  root.suggestIndex = index
+                  var wasPlace = modelData.kind === "place"
+                  root.acceptSuggestion(index)
+                  if (wasPlace) root.submitSearch()
+                }
+              }
+            }
+          }
+        }
+
         Text {
           // Anything rendered here can carry API- or user-supplied text, and AutoText would
           // interpret it as markup. Set on every Text without exception, so the rule is
@@ -3576,10 +3852,11 @@ Item {
           text: root.searchNote !== "" ? root.searchNote
               : (root.chosenLoc
                  ? "A place, a moment, or both: Istanbul @ tomorrow 15:00"
+                   + "  \u00b7  \u2191\u2193 to choose"
                    + "  \u00b7  empty Enter follows this machine again"
                    + "  \u00b7  Esc to cancel"
                  : "A place, a moment, or both: Istanbul @ tomorrow 15:00"
-                   + "  \u00b7  Esc to cancel")
+                   + "  \u00b7  \u2191\u2193 to choose  \u00b7  Esc to cancel")
         }
       }
     }
@@ -3618,16 +3895,31 @@ Item {
         event.accepted = true
         if (root.searching) {
           if (event.key === Qt.Key_Escape) {
-            root.searching = false; root.searchText = ""; root.searchFailed = false; root.searchNote = ""
+            root.searching = false; root.searchText = ""
+            root.searchFailed = false; root.searchNote = ""
+            root.clearSuggestions()
+          } else if (event.key === Qt.Key_Down) {
+            root.suggestIndex =
+              Math.min(root.suggestIndex + 1, root.suggestions.length - 1)
+          } else if (event.key === Qt.Key_Up) {
+            // -1 is your own text, which must stay reachable
+            root.suggestIndex = Math.max(root.suggestIndex - 1, -1)
+          } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+            root.acceptSuggestion(root.suggestIndex >= 0 ? root.suggestIndex : 0)
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (root.suggestIndex >= 0) root.acceptSuggestion(root.suggestIndex)
             root.submitSearch()
           } else if (event.key === Qt.Key_Backspace) {
             root.searchText = root.searchText.slice(0, -1)
+            root.suggestPick = null
             root.searchFailed = false; root.searchNote = ""
+            root.scheduleSuggestions()
           } else if (event.text && event.text.length === 1
                      && event.text >= " " && root.searchText.length < 60) {
             root.searchText += event.text
+            root.suggestPick = null
             root.searchFailed = false; root.searchNote = ""
+            root.scheduleSuggestions()
           }
           return
         }

@@ -669,6 +669,76 @@ also make every place on earth stormier than it is, which is the opposite of the
 point. CAPE and the lifted index were chosen precisely because they are the
 fields the models agree on.
 
+### Suggesting, without spending
+
+The search line took a place name on faith. That is how "Cyprus" ends up being
+a mountain: the geocoder answers a country with its centroid, and nothing on
+screen said so until the scene had already been drawn somewhere else.
+
+It suggests now, and the budget is the whole design:
+
+- **320 ms of debounce**, which fires on a pause rather than on a keystroke —
+  typing runs about 200 ms between keys.
+- **Three characters minimum.** Two match thousands of places and burn a
+  request for a list nobody can use.
+- **Skipped when the place text has not changed**, so backspacing into a word
+  and out again re-asks nothing.
+- **A negative prefix cache**: if a shorter prefix matched nothing, nothing
+  longer can, so it is not asked.
+- **A memo** of query to results, for the session.
+- **Eight requests per opening of the box**, so a held key cannot spend thirty.
+- **Suspended entirely while the rate-limit brake is on.**
+
+And it *saves* a request rather than costing one. An accepted suggestion
+carries the coordinates the geocoder already returned, canonicalised through
+the same `validLoc()` as everything else, so submitting spends no lookup at
+all — where typing the name out and pressing Enter always spent one. A typical
+search now costs about two geocodes instead of one, and then *nothing* for the
+place itself; with the terrain cache behind it, going somewhere you have been
+before costs a forecast.
+
+The moment half costs nothing at all: those candidates are generated locally
+and then run through `parseWhen()`, the same parser that will have to accept
+them. A suggestion can therefore never be something the search then refuses.
+
+The list is a `Repeater` in a `Column` — at most five places or six moments,
+nothing to virtualise, and a plain JavaScript array is a perfectly good model.
+Rows take a touch, which means `searchLayer` had to stop being `enabled: false`
+and start being `enabled: root.searching`: at zero opacity it must stay
+transparent to touch or it would swallow every gesture on the panel, and while
+it is up the sky underneath should be inert anyway, because a modal search is
+not something you scrub behind.
+
+### A globe, and what it is not allowed to do
+
+A wireframe globe sits beside the place name, orthographic and centred on
+wherever you are looking, so the marker is at the middle by construction.
+
+It lives in two files of its own — `Globe.qml` and `coastline.js` — because it
+is the one part of this that is decoration rather than data, and deleting the
+pair plus one block removes it cleanly. The coastlines are Natural Earth 110m
+simplified to 925 vertices; [docs/coastline.md](coastline.md) has the source,
+the method and the script.
+
+Two constraints shaped it more than anything about how it looks:
+
+- **It must not repaint on `tod`.** The idle drift assigns `tod` every 250 ms
+  and a scrub assigns it every frame. Software-rasterising 925 vertices plus a
+  graticule at 60 Hz, next to a shader that already saturates a 24-EU part,
+  would be the most expensive thing in the scene by a wide margin. It repaints
+  on a change of place, and on becoming visible, and at no other time.
+- **It must not take a touch.** It is a `Canvas` with no input handler and
+  `enabled: false` on top of that, so a finger on it reaches the sky.
+
+That is also why there is no day/night terminator on it, which is the obvious
+next thing to add and the one thing that would tie it straight back to the
+clock. If it ever gets one, it needs its own slow timer.
+
+Positioned by binding rather than by anchor, incidentally: the place name lives
+inside the readout's `Column`, and an anchor may only name a parent or a
+sibling — but a binding across the tree is fine, and this way the Column's
+layout is left completely alone.
+
 ### Time passes
 
 Left alone the sky drifts forward at about **one sky-hour per real minute**, so
