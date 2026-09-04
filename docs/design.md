@@ -425,6 +425,71 @@ one pushed the viewpoint to the cap and halved the hill. And the fan's rings
 **scale with how far back you stand** — fixed rings at 6 and 11 km straddled a
 2 km hill 7 km away and missed it completely.
 
+### What the flat test cannot see
+
+Two places proved it incomplete, and they failed for different reasons.
+
+**Toronto had no water at all** — a city on the shore of one of the largest
+lakes on earth. The geocoder puts it about 7 km inland, and the near field is a
+12 km square, so Lake Ontario grazed one corner of it: a single sample at 74 m,
+against the four a level needs. The lake was never in the picture to be found.
+
+**Amsterdam had none either**, and cannot be rescued by this test at all. The
+Netherlands is below sea level and flat, so water there is neither the lowest
+thing around nor an isolated spike. Its histogram is a smear from −5 to +3 m
+with no conditioned surface in it, because the IJ and the canals are narrower
+than the DEM's postings and get averaged with their banks. The one level that
+*does* repeat is the Haarlemmermeer floor — drained farmland, which is the same
+shape of evidence as Kansas.
+
+The obvious fixes are both wrong, and both were measured rather than argued:
+
+| tried | result |
+|---|---|
+| widen the near field to ±15 km | **loses Montreal's river** — past about 1.4 km spacing the St Lawrence stops repeating an exact metre four times |
+| a concentric ring layout reaching 20 km | same, for the same reason |
+| a hybrid dense-inner-plus-outer-rings layout | same |
+| loosen the gates to admit Amsterdam | **admits polder, playa and floodplain worldwide.** The isolation window that lets Amsterdam's −5 m in is the same one that lets Kansas farmland in |
+
+Near water needs sample density and far water needs reach, and a hundred points
+cannot do both. So the near field is left exactly as it was, and the two gaps
+are closed from elsewhere.
+
+**Distant water comes free.** Pass 1 already samples a 25 km disc — centre plus
+33 azimuths at 4, 11 and 25 km — and its elevations are already kept for the
+skyline. Running the same classifier over them, under the same gates, finds
+Lake Ontario at 23% of the samples at a dead flat 74 m, and costs no request at
+all. Nearer wins, so it never overrules the river at the end of the street.
+
+**Open water is asked for rather than inferred.** The marine model answers with
+a wave height wherever there is open water and with nulls everywhere else,
+which is a direct statement about sea instead of a guess from the shape of the
+ground — and it has no opinion about polder. Twelve points on rings at 5, 12
+and 25 km, one request, the same provider as everything else. Its grid cells
+are about nine kilometres across, so the reply's own coordinates are used
+rather than the ones asked for; using the asked-for point had Limassol
+reporting the Mediterranean to the north of it.
+
+The ground outranks it either way. The marine model only knows *there is open
+water in this cell*, so left to itself it would call Lake Ontario a sea filling
+the whole foreground, when the elevation pass has correctly called it a lake.
+It is a fallback for what the ground cannot describe, not a rival to it.
+
+| place | verdict | from |
+|---|---|---|
+| Toronto | lake, 74 m, 25 km, bearing 150° | pass 1 |
+| Montreal | river, 4 m, 5.7 km | near field, unchanged |
+| Amsterdam | sea, 3.8 km, bearing 77° — the IJmeer | marine |
+| Limassol | sea, 6.6 km, bearing 176° | marine |
+| Quito, Kansas, Phoenix, Zermatt | dry | all three agree |
+
+One more thing this does not fix, because it is not broken: **searching a
+country gives you the middle of it.** "Cyprus" resolves to 35°N 33°E, 689 m up
+in the Troodos and 35 km from any coast, and the scene is right to draw no
+water there. A populated place is preferred over a centroid where the geocoder
+offers one *in the same country* — without that qualification, the five answers
+for "Cyprus" would have sent you to a village in Jamaica.
+
 ### Sunrise and sunset, where you actually are
 
 The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every day of
