@@ -163,6 +163,12 @@ sunset                    a moment here, without moving
 +3        yesterday 15:00        2026-09-12 6:30        friday 3pm
 ```
 
+It suggests as you type — places from the geocoder, with the region and country
+alongside so the five different Springfields are telling apart, and moments
+from a list it holds itself once you have typed an `@`. Arrow keys or a tap to
+choose, `Tab` to complete. A suggestion you accept carries its own coordinates,
+so choosing one is actually *cheaper* than typing the name out.
+
 Either half alone is fine. With no separator the line is taken as a moment only
 if it plainly is one — it has a digit in it, or it is a word like `tomorrow` —
 so `March`, `Sunday` and `New York` still look for towns. Empty Enter follows
@@ -189,7 +195,9 @@ you let go.
 
 A readout under the scene names the date, the conditions and the temperature at
 wherever you have dragged to, and a strip along the bottom shows the whole
-window at a glance.
+window at a glance. Beside it is a small wireframe globe, turned to put you at
+its centre — mostly so that hopping from Quito to Tromso feels like the
+distance it is.
 
 ## Configure
 
