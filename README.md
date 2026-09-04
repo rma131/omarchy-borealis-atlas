@@ -263,6 +263,11 @@ temporary that is flushed and then atomically renamed. It is read back as
 untrusted input — bounded, shape-checked, and discarded rather than trusted if
 either fails.
 
+Coastlines for the globe are **Natural Earth** 1:110m, public domain (CC0),
+simplified to 925 vertices — see [docs/coastline.md](docs/coastline.md) for the
+source, the method and the script to regenerate it. It is the only bundled data
+in this repository that is not code.
+
 Weather, climate, elevation and geocoding come from
 [Open-Meteo](https://open-meteo.com) (CC BY 4.0), built on
 [ECMWF](https://www.ecmwf.int) and other national services; elevation is the
