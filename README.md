@@ -171,6 +171,12 @@ this machine again.
 A moment you asked for holds the sky still, because a date you typed is a
 question and not ambience; touching the screen hands it back to the clock.
 
+**When something is wrong, it says so.** A failed fetch used to leave you with
+a default sky and no explanation. A line at the top now names what is unhappy
+and why — no connection, the service is busy, it is not answering — so you can
+tell your network from ours. Terrain is remembered per place, so going back to
+a city you have already looked at costs a forecast rather than seven requests.
+
 **The clock is the place's, not yours.** Go to Istanbul from Montreal and you
 get Istanbul's afternoon, not your morning — the forecast was always in local
 hours, and now the sun is too. The readout names the zone whenever it differs
@@ -222,6 +228,7 @@ No account, no API key, nothing stored anywhere but your own machine.
 | What leaves your machine | Where it goes | Why |
 |---|---|---|
 | Your IP, implicitly | `get.geojs.io`, and `wttr.in` as a fallback | To know roughly where you are — **only when no location is configured** |
+| An approximate latitude and longitude | `marine-api.open-meteo.com` | Whether there is open water near you, which the ground alone cannot always say |
 | An approximate latitude and longitude | `api.open-meteo.com`, `archive-api.open-meteo.com`, `geocoding-api.open-meteo.com` | Forecast, a year of climate normals, terrain elevation, and place search |
 | Nothing | `services.swpc.noaa.gov` | NOAA's global aurora index, which is the same for everyone |
 

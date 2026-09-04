@@ -382,7 +382,7 @@ Item {
   function openSearch() {
     root.searching = true
     root.searchText = ""
-    root.searchNote = ""
+    root.searchFailed = false; root.searchNote = ""
   }
 
   // ---- "when": a date, a time, or both -------------------------------------
@@ -544,36 +544,46 @@ Item {
     var when = null
     if (q.when.length) {
       when = root.parseWhen(q.when)
-      if (!when) { root.searchNote = "Not a date I know"; return }
+      if (!when) { root.searchFailed = true; root.searchNote = "Not a date I know"; return }
       // The window is the fetch's, not the parser's, and saying so beats
       // silently snapping to the nearest edge.
       if (when.day < -7 || when.day > 16) {
-        root.searchNote = "Only 7 days back and 16 forward"
+        root.searchFailed = true; root.searchNote = "Only 7 days back and 16 forward"
         return
       }
     }
     if (!q.place.length) {
-      if (!when) { root.searchNote = "Nothing to go to"; return }
+      if (!when) { root.searchFailed = true; root.searchNote = "Nothing to go to"; return }
       root.searching = false
-      root.searchNote = ""
+      root.searchFailed = false; root.searchNote = ""
       root.pendingWhen = when
       root.applyWhen()
       return
     }
     root.pendingWhen = when        // applied when that place's forecast lands
-    root.searchNote = "Looking for " + q.place + "…"
+    root.searchFailed = false; root.searchNote = "Looking for " + q.place + "…"
     root.geoForSearch = true
     geocode(q.place)
   }
 
   property bool geoForSearch: false
+
+  // "Nothing found" was shown whatever went wrong, so an outage read as a
+  // spelling mistake. The status model already knows the difference.
+  function geoFailNote() {
+    var h = root.srcOf("geocode")
+    if (h === "offline")   return "No connection"
+    if (h === "ratelimit") return "The place lookup is busy \u2014 try again in a moment"
+    if (h === "timeout")   return "The place lookup is not answering"
+    if (h !== "" && h !== "ok") return "Could not reach the place lookup"
+    return "Nothing found"
+  }
   // Notes that mean "that did not work", so the line can say so in amber
   // rather than in the same calm grey it uses for a hint.
-  readonly property bool searchFailed:
-    root.searchNote === "No such place" || root.searchNote === "Nothing found"
-    || root.searchNote === "Not a date I know"
-    || root.searchNote === "Only 7 days back and 16 forward"
-    || root.searchNote === "Nothing to go to"
+  // Set beside every note rather than inferred from its text: the old
+  // string-equality list had already drifted once and would drift again with
+  // every new message.
+  property bool searchFailed: false
 
   // editing shell.json re-resolves immediately, which is the point of having it
   // The ring and the climate belong to the old place, not the new one. Leaving
@@ -600,6 +610,7 @@ Item {
   readonly property int capWttr:      262144
   readonly property int capKp:        131072
   readonly property int capElevation:  65536
+  readonly property int capMarine:    131072
   readonly property int capGeocode:    65536
   readonly property int capIp:         32768
 
@@ -614,11 +625,106 @@ Item {
   // `--proto =https` pins the scheme so a redirect or a rewritten URL cannot
   // downgrade the transport; curl is never given -L, so it does not follow
   // redirects at all.
+  // No --retry. curl counts 429 among its transient errors, so the flag meant
+  // that hitting a rate limit answered it with two more requests against the
+  // very limiter that had just said no — and five of the seven endpoints here
+  // share one host. Retrying is the top-up timer's job below, because only
+  // this side knows what a 429 means and how long to wait.
+  //
+  // It also makes the timeout honest: --max-time is per attempt, so a forecast
+  // could take 10 + 2 + 10 + 2 + 10 = 34 s to be known dead while the retry
+  // budget that was supposed to cover it expired after 13.
   function curlCmd(seconds, maxBytes, url) {
     return ["curl", "-fsS", "--proto", "=https",
-            "--retry", "2", "--retry-delay", "2",
             "--max-time", String(seconds),
             "--max-filesize", String(maxBytes), url]
+  }
+
+  // ---- what happened, as opposed to merely that nothing happened -----------
+  // Every failure used to arrive at the same place — onStreamFinished with an
+  // empty string — and be absorbed by a `return` or an empty catch. A dead
+  // network and a malformed reply were indistinguishable by construction, so
+  // the honest answer to "is it me or the app" could not be given because
+  // nothing in the process knew it either.
+  //
+  // curl's exit code separates them cleanly, and its stderr carries the HTTP
+  // status. That stderr is untrusted input like any other — it echoes the URL
+  // back — so it is bounded, matched for three digits, and never rendered.
+  function classifyExit(code, errText) {
+    if (code === 0) return "ok"
+    if (code === 6 || code === 7) return "offline"
+    if (code === 28) return "timeout"
+    if (code === 63) return "toobig"
+    if (code === 35 || code === 60 || code === 77 || code === 91) return "tls"
+    if (code === 22) {
+      var m = root.capStr(errText, 200).match(/error:?\s*(\d{3})/)
+      var h = m ? parseInt(m[1], 10) : 0
+      if (h === 429) return "ratelimit"
+      if (h >= 500) return "server"
+      return "badrequest"
+    }
+    return "failed"
+  }
+
+  // One row per source, so the status line can name what is wrong rather than
+  // saying something is.
+  property var netStatus: ({})
+  property int statusRev: 0
+  // A 429 from one Open-Meteo host is a 429 from all of them, so the brake is
+  // global rather than per-endpoint.
+  property real backoffUntilMs: 0
+  function heldBack() { return Date.now() < root.backoffUntilMs }
+
+  function noteExit(src, code, errText, ok) {
+    var how = ok ? "ok" : root.classifyExit(code, errText)
+    var m = {}
+    for (var k in root.netStatus) m[k] = root.netStatus[k]
+    m[src] = { how: how, at: Date.now() }
+    root.netStatus = m
+    root.statusRev++
+    if (how === "ratelimit") root.backoffUntilMs = Date.now() + 60000
+  }
+  // The scene used to fail beautifully: a dead network gave you a default sky
+  // and a clock, with nothing anywhere saying so. This is the sentence that
+  // was missing — which source is unhappy, and whether it is you or us.
+  readonly property string trouble: {
+    root.statusRev                      // recompute when a status lands
+    if (!root.opened) return ""
+    if (root.anySrc("offline"))
+      return root.fc ? "No connection \u2014 this is the last sky I have"
+                     : "No connection"
+    if (root.heldBack())
+      return "The weather service is busy \u2014 asking again shortly"
+    var f = root.srcOf("forecast")
+    if (f === "timeout")   return "The weather service is not answering"
+    if (f === "server")    return "The weather service returned an error"
+    if (f === "tls")       return "Could not make a secure connection"
+    if (f === "toobig" || f === "badrequest")
+                           return "The forecast reply was not usable"
+    if (!root.fc && root.loc && root.topUps >= 2)
+      return "No forecast for " + root.loc.name + " yet"
+    var e = root.srcOf("elevation")
+    if (e !== "" && e !== "ok" && !root.horizon)
+      return "No measured horizon here"
+    return ""
+  }
+  // Shown only once it has persisted: a single hiccup that then succeeds
+  // should not flash an alarm across a screensaver.
+  property bool troubleShown: false
+  onTroubleChanged: {
+    if (root.trouble === "") { root.troubleShown = false; troubleDelay.stop() }
+    else troubleDelay.restart()
+  }
+  Timer { id: troubleDelay; interval: 5000; onTriggered: root.troubleShown = true }
+
+  function srcOf(src) {
+    var e = root.netStatus[src]
+    return e ? e.how : ""
+  }
+  function anySrc(how) {
+    for (var k in root.netStatus)
+      if (root.netStatus[k] && root.netStatus[k].how === how) return true
+    return false
   }
 
   // A parse that cannot be made to consume memory or to hand back something
@@ -773,24 +879,41 @@ Item {
   // the next refresh, which for the horizon meant no horizon at all.
   readonly property bool dataMissing:
     loc !== null && (fc === null || kp === null || climate === null
-                     || horizon === null || water === null)
+                     || horizon === null || water === null || !marineAsked)
   property int topUps: 0
+  property real nextTopUpMs: 0
+  // Asked once per place: a coastline does not move, and a null answer is as
+  // final as a positive one.
+  property bool marineAsked: false
+  // Returns whether anything was actually asked for, so the budget counts
+  // requests issued rather than timer ticks — the old one spent its whole
+  // allowance on no-ops while the first request was still on the wire.
   function topUp() {
-    if (!loc) return
-    root.topUps++
-    if (!fc && !fcProc.running) fetchForecast()
-    if (!kp && !kpProc.running) fetchKp()
-    if (!climate && !climProc.running) fetchClimate()
+    if (!loc || root.heldBack()) return false
+    var did = false
+    if (!fc && !fcProc.running)        { fetchForecast(); did = true }
+    if (!kp && !kpProc.running)        { fetchKp();       did = true }
+    if (!climate && !climProc.running) { fetchClimate();  did = true }
     if ((!horizon || !water)
         && !elevProc.running && !fanProc.running && !nearProc.running)
-      fetchHorizon()
+      { fetchHorizon(); did = true }
+    if (!marineAsked && !marineProc.running) { fetchMarine(); did = true }
+    return did
   }
   Timer {
-    interval: 2200; repeat: true
+    interval: 1000; repeat: true
     // Bounded, so a place the elevation service will not answer for costs six
     // tries and then stops rather than hammering it for as long as you look.
     running: root.opened && root.dataMissing && root.topUps < 6
-    onTriggered: root.topUp()
+    onTriggered: {
+      if (Date.now() < root.nextTopUpMs) return
+      if (!root.topUp()) return
+      root.topUps++
+      // 2.5, 5, 10, 20, 40, 60 s — about two and a half minutes of patience
+      // against a ten second request, where it used to be thirteen seconds.
+      root.nextTopUpMs = Date.now()
+                       + Math.min(2500 * Math.pow(2, root.topUps - 1), 60000)
+    }
   }
 
   onLocChanged: {
@@ -809,6 +932,9 @@ Item {
     // and the readout says as much rather than quoting a time it knows is
     // wrong. This is also what makes the arrival re-seed the clock even when
     // two places happen to share an offset.
+    // Whatever we already know about this ground, before asking for any of it
+    // again. A revisit costs a forecast and a Kp index, not seven requests.
+    root.restoreTerrain()
     root.tzStale = true
     root.notice = true
     noticeTimer.restart()
@@ -1409,17 +1535,22 @@ Item {
     root.kp = { ms: kp.ms, vals: kp.vals, hrs: h }
   }
 
+  // lastFetchMs is when data last actually LANDED; lastTryMs is when one was
+  // last attempted. Stamping the first before anything succeeded marked a
+  // failed refresh as fresh for half an hour.
+  property real lastTryMs: 0
   function refreshSky(force) {
     if (!force && Date.now() - lastFetchMs < cacheMaxAgeMs) return
-    lastFetchMs = Date.now()
+    if (Date.now() - lastTryMs < 5000) return      // re-entry guard, not freshness
+    lastTryMs = Date.now()
     if (root.chosenLoc) {
       root.loc = root.chosenLoc
-      fetchForecast(); fetchKp(); fetchHorizon(); fetchClimate()
+      fetchForecast(); fetchKp(); fetchHorizon(); fetchClimate(); fetchMarine()
       return
     }
     var c = configLoc
     if (c && c.lat !== undefined) {
-      root.loc = c; fetchForecast(); fetchKp(); fetchHorizon(); fetchClimate(); return
+      root.loc = c; fetchForecast(); fetchKp(); fetchHorizon(); fetchClimate(); fetchMarine(); return
     }
     if (c && c.name) { geocode(c.name); return }
     // No shortcut on an existing loc: the IP can move (a VPN, or actually
@@ -1444,15 +1575,19 @@ Item {
   }
 
   function geocode(place) {
-    if (geoProc.running) return
+    if (geoProc.running || root.heldBack()) return
     geoProc.command = root.curlCmd(8, root.capGeocode,
-      "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name="
+      // Five rather than one, so a populated place can be preferred over a
+      // country's centroid. Typing "Cyprus" used to land on 35N 33E — 689 m up
+      // in the Troodos, thirty-five kilometres from any coast — and the scene
+      // was then perfectly right to say there was no water.
+      "https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name="
       + encodeURIComponent(place))
     geoProc.running = true
   }
 
   function fetchForecast() {
-    if (!loc || fcProc.running) return
+    if (!loc || root.heldBack() || fcProc.running) return
     root.beginFetch(fcProc)
     fcProc.command = root.curlCmd(10, root.capForecast,
       "https://api.open-meteo.com/v1/forecast"
@@ -1477,7 +1612,7 @@ Item {
   // P / PET, the UN's aridity index. Sahara 0.01, Dubai 0.18, Phoenix 0.26,
   // Zermatt 0.89, Montreal 1.20 — which is exactly the right order.
   function fetchClimate() {
-    if (!loc || climProc.running) return
+    if (!loc || root.heldBack() || climProc.running) return
     root.beginFetch(climProc)
     // the archive runs a few days behind live, so end a week back
     var end = new Date(Date.now() - 7 * 86400000)
@@ -1556,7 +1691,7 @@ Item {
   }
 
   function fetchHorizon() {
-    if (!loc || elevProc.running) return
+    if (!loc || root.heldBack() || elevProc.running) return
     root.beginFetch(elevProc)
     var la = [loc.lat.toFixed(4)], lo = [loc.lon.toFixed(4)]
     for (var k = 0; k < root.hzAz; k++) {
@@ -1587,7 +1722,7 @@ Item {
   // side of it looking back — the picture this scene has always been composing
   // is a view across water toward land, and standing anywhere else fights it.
   function fetchHorizonFan(vx, vy, centreAz, rings) {
-    if (!loc || fanProc.running) return
+    if (!loc || root.heldBack() || fanProc.running) return
     root.beginFetch(fanProc)
     var vd = Math.sqrt(vx * vx + vy * vy)
     var vlat = loc.lat, vlon = loc.lon
@@ -1637,7 +1772,7 @@ Item {
   readonly property int nearN: 10
 
   function fetchNearField() {
-    if (!loc || nearProc.running) return
+    if (!loc || root.heldBack() || nearProc.running) return
     root.beginFetch(nearProc)
     var la = [], lo = []
     for (var i = 0; i < root.nearN; i++) {
@@ -1656,6 +1791,141 @@ Item {
 
   // No water, or no answer: stand where you are and face whatever rises
   // highest, which is what this did before there was any water in it.
+  // ---- water, from any set of samples ---------------------------------------
+  // Lifted out of the near-field handler because the near field is not the only
+  // place that has already measured the ground. Pass 1 samples a 25 km disc and
+  // its elevations are kept anyway, so a lake beyond the near field's 6 km box
+  // costs nothing extra to notice — which is what Toronto turned out to need:
+  // the geocoder puts it about 7 km inland, so Lake Ontario barely entered the
+  // near field and the scene drew a city on the shore of a lake with no water
+  // in it at all.
+  //
+  // The gates are deliberately unchanged. Widening the near grid to reach the
+  // lake instead was tried and loses Montreal's river — at more than about
+  // 1.4 km spacing the St Lawrence stops repeating an exact metre four times —
+  // and loosening them to admit Amsterdam admits drained polder with it, which
+  // is the same shape of evidence as Kansas farmland. A false ocean is a much
+  // louder failure than a missing river.
+  //
+  // refArea is what `frac` is measured against. It has to be passed in because
+  // the two passes cover very different footprints, and the 0.12 river/lake
+  // threshold was calibrated as a share of ground, not a share of samples.
+  function findWater(dx, dy, e, refArea, cellArea) {
+    var n0 = e.length, i, q
+    var count = {}, levels = []
+    for (i = 0; i < n0; i++) {
+      var v = e[i]
+      if (count[v] === undefined) { count[v] = 0; levels.push(v) }
+      count[v]++
+    }
+    levels.sort(function (a, b) { return a - b })
+    var at = function (v) { return count[v] === undefined ? 0 : count[v] }
+
+    var lvl = null, best = 0
+    for (q = 0; q < levels.length; q++) {
+      var v2 = levels[q], n = at(v2)
+      if (n < 4) continue
+      // an isolated spike, not the shoulder of a smooth cluster
+      var isol = n / (1 + at(v2 - 1) + at(v2 + 1) + at(v2 - 2) + at(v2 + 2))
+      // and the lowest ground around: water is where water collects
+      if (isol >= 1.5 && q <= 1 && n > best) { best = n; lvl = v2 }
+    }
+    if (lvl === null) return null
+
+    var frac = Math.min(1.0, (best * cellArea) / refArea)
+    // Sea is water the DEM conditions to zero, give or take a metre of
+    // rounding. Water genuinely below sea level is an inland body — the Dead
+    // Sea at -430 m and a Dutch canal at -5 are not oceans filling the whole
+    // foreground, which is what a bare `lvl <= 1.0` used to call them.
+    var kind = (lvl >= -2.0 && lvl <= 1.0) ? 3 : (frac >= 0.12 ? 2 : 1)
+
+    // Which way it lies, and how far out it reaches along that bearing.
+    var sx = 0, sy = 0
+    for (i = 0; i < n0; i++)
+      if (e[i] === lvl) { sx += dx[i]; sy += dy[i] }
+    sx /= best; sy /= best
+    var waz = (Math.atan2(sx, sy) * 180 / Math.PI + 360) % 360
+
+    var ds = []
+    for (i = 0; i < n0; i++) {
+      if (e[i] !== lvl) continue
+      var a4 = Math.atan2(dx[i], dy[i]) * 180 / Math.PI
+      var rel4 = ((a4 - waz + 540) % 360) - 180
+      if (Math.abs(rel4) <= 25)
+        ds.push(Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]))
+    }
+    ds.sort(function (a, b) { return a - b })
+    // The median and not the farthest: the grid is a square, so its corners
+    // are 8.5 km out and a river running diagonally across one pushed the
+    // viewpoint to the cap and shrank Mount Royal by half.
+    var med = ds.length ? ds[Math.floor(ds.length / 2)] : 3000.0
+    return { level: lvl, kind: kind, frac: frac, az: waz, dist: med,
+             src: "ground" }
+  }
+
+  // Ground beats sea-model, then nearer beats further.
+  //
+  // The ground has measured the actual surface and knows a lake from an ocean;
+  // the marine model only knows "there is open water in this nine-kilometre
+  // cell", which for Toronto would call Lake Ontario a sea filling the whole
+  // foreground when the elevation pass has correctly called it a lake. So the
+  // probe is a fallback for the places the ground cannot describe, not a rival
+  // to it — and among equals, water at the end of the street beats water on
+  // the horizon.
+  function adoptWater(w) {
+    if (!w) return
+    var cur = root.water
+    if (!cur || cur.kind === 0) { root.water = w; return }
+    var curGround = cur.src !== "marine", newGround = w.src !== "marine"
+    if (curGround && !newGround) return
+    if (!curGround && newGround) { root.water = w; return }
+    if (cur.dist <= w.dist) return
+    root.water = w
+  }
+
+  // ---- open water, asked rather than inferred -------------------------------
+  // The elevation test cannot see Amsterdam. Copernicus conditions the
+  // Netherlands' *land* flat too, so the water there is neither the lowest
+  // thing around nor an isolated spike — it is a smear from -5 m to +3 m with
+  // no repeated surface in it, and the -5 m that does repeat is the
+  // Haarlemmermeer polder floor, which is drained farmland and the same shape
+  // of evidence as Kansas. Loosening the gates to admit it would light up
+  // polder, playa and floodplain worldwide, and a false ocean is a much louder
+  // failure than a missing river.
+  //
+  // So this asks instead of inferring. The marine model answers with a wave
+  // height wherever there is open water and with nulls everywhere else, which
+  // is a direct statement about sea rather than a guess from the shape of the
+  // ground. Same provider as everything else, so no new host to justify.
+  // Measured: Limassol, Istanbul and Toronto answer; Quito, Nicosia and
+  // Montreal correctly do not; Amsterdam answers 25 km out, which is where the
+  // North Sea approaches actually are.
+  readonly property var marineRings: [5000.0, 12000.0, 25000.0]
+  readonly property int marineAz: 4
+  property var marinePts: []
+
+  function fetchMarine() {
+    if (!loc || root.heldBack() || marineProc.running) return
+    root.beginFetch(marineProc)
+    var la = [], lo = [], pts = []
+    for (var r = 0; r < root.marineRings.length; r++) {
+      for (var k = 0; k < root.marineAz; k++) {
+        var az = 360.0 * k / root.marineAz + (r % 2 ? 45.0 : 0.0)
+        var d = root.marineRings[r]
+        var pt = root.offsetLL(loc.lat, loc.lon, d, az)
+        la.push(pt[0].toFixed(4)); lo.push(pt[1].toFixed(4))
+        pts.push(d * Math.sin(az * Math.PI / 180), d * Math.cos(az * Math.PI / 180))
+      }
+    }
+    root.marinePts = pts
+    root.marineAsked = true
+    marineProc.command = root.curlCmd(8, root.capMarine,
+      "https://marine-api.open-meteo.com/v1/marine?latitude=" + la.join(",")
+      + "&longitude=" + lo.join(",")
+      + "&hourly=wave_height&forecast_days=1")
+    marineProc.running = true
+  }
+
   function fallbackFan() {
     root.fetchHorizonFan(0, 0, root.hzTerrainAim, root.hzFan.concat([]))
   }
@@ -1676,9 +1946,12 @@ Item {
     return a
   }
 
+  // No generation stamp: Kp is one global number, so a reply that arrives for
+  // the place you have just left is still perfectly good data. Only *when* it
+  // applies is local, and rebuildKpHours() re-derives that on every zone
+  // change, which is what actually makes it place-independent.
   function fetchKp() {
-    if (kpProc.running) return
-    root.beginFetch(kpProc)
+    if (kpProc.running || root.heldBack()) return
     kpProc.running = true
   }
 
@@ -1698,15 +1971,138 @@ Item {
   // one filesystem, so a reader sees the old file or the new one, never a torn
   // one.
   property string _pendingCache: ""
+  // ---- terrain, remembered per place ----------------------------------------
+  // The ground does not change. But every visit to a city re-asked for it:
+  // three elevation passes, a marine probe and a year of climate normals, five
+  // of the seven requests a location change costs. Trying city after city —
+  // which is exactly how you use a thing like this — walked straight into the
+  // service's rate limit, and because every failure here was silent, the scene
+  // just quietly stopped having a horizon.
+  //
+  // Two decimal places is about 1.1 km. Fine enough that two places never
+  // collide, since the near field is 12 km across, and coarse enough to absorb
+  // the jitter between successive IP lookups of one address.
+  readonly property int maxTerrainPlaces: 24
+  readonly property real terrainMaxAgeMs: 90 * 86400000
+  property var terrain: ({})
+
+  function terrainKey(l) {
+    return l ? (l.lat.toFixed(2) + "," + l.lon.toFixed(2)) : ""
+  }
+
+  function validTerrain(t) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) return null
+    var el = root.finiteIn(t.elevation, -500, 9000)
+    var h0 = root.finiteIn(t.hzH0, -500, 9000)
+    if (el === null || h0 === null) return null
+    var o = { elevation: el, hzH0: h0,
+              at: root.finiteIn(t.at, 0, 4102444800000) || 0,
+              marineAsked: t.marineAsked === true }
+    o.ring = (t.ring && root.finiteIn(t.ring.spread, 0, 9000) !== null
+                     && root.finiteIn(t.ring.sea, 0, 1) !== null)
+           ? { spread: +t.ring.spread, sea: +t.ring.sea } : null
+    o.climate = (t.climate && root.finiteIn(t.climate.ai, 0, 100) !== null)
+              ? { ai: +t.climate.ai } : null
+    o.horizon = null
+    if (t.horizon && root.numArray(t.horizon.coef, 16, -100, 100, false)
+                  && t.horizon.coef.length === 12
+                  && root.finiteIn(t.horizon.maxAng, -90, 90) !== null
+                  && root.finiteIn(t.horizon.base, -500, 9000) !== null
+                  && root.finiteIn(t.horizon.span, 0, 9000) !== null)
+      o.horizon = { coef: t.horizon.coef, maxAng: +t.horizon.maxAng,
+                    base: +t.horizon.base, span: +t.horizon.span }
+    o.water = null
+    if (t.water && t.water.src !== "marine") t.water.src = "ground"
+    if (t.water && root.finiteIn(t.water.kind, 0, 3) !== null
+                && root.finiteIn(t.water.level, -500, 9000) !== null
+                && root.finiteIn(t.water.frac, 0, 1) !== null
+                && root.finiteIn(t.water.az, 0, 360) !== null
+                && root.finiteIn(t.water.dist, 0, 60000) !== null)
+      o.water = { kind: +t.water.kind, level: +t.water.level, src: t.water.src,
+                  frac: +t.water.frac, az: +t.water.az, dist: +t.water.dist }
+    return o
+  }
+
+  // The keys here are the one part of the cache an attacker could choose, and
+  // every Object.prototype name answers a plain lookup in this engine — the
+  // palette table above documents the same hazard. So the shape of a key is
+  // checked before it is trusted, and every lookup is an own-property lookup.
+  readonly property var terrainKeyRe:
+    /^-?\d{1,2}(\.\d{1,2})?,-?\d{1,3}(\.\d{1,2})?$/
+
+  function loadTerrain(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return ({})
+    var keys = Object.keys(raw)
+    if (keys.length > root.maxTerrainPlaces) return ({})   // too many is malformed
+    var out = {}, now = Date.now()
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i]
+      if (!root.terrainKeyRe.test(k)) continue
+      if (!Object.prototype.hasOwnProperty.call(raw, k)) continue
+      var v = root.validTerrain(raw[k])
+      if (!v) continue
+      if (now - v.at > root.terrainMaxAgeMs) continue
+      out[k] = v
+    }
+    return out
+  }
+
+  function rememberTerrain() {
+    if (!loc) return
+    var k = root.terrainKey(loc)
+    if (!k) return
+    var m = {}
+    for (var q in root.terrain)
+      if (Object.prototype.hasOwnProperty.call(root.terrain, q)) m[q] = root.terrain[q]
+    m[k] = { at: Date.now(), elevation: root.elevation, hzH0: root.hzH0,
+             ring: root.ring, climate: root.climate, horizon: root.horizon,
+             water: root.water, marineAsked: root.marineAsked }
+    // Oldest out first, and trimmed before the payload is built rather than
+    // after: saveCache() silently declines to write anything over the cap, so
+    // an unbounded map would end up costing us the forecast as well.
+    var ks = Object.keys(m)
+    while (ks.length > root.maxTerrainPlaces) {
+      var oldest = null
+      for (var j = 0; j < ks.length; j++)
+        if (oldest === null || (m[ks[j]].at || 0) < (m[oldest].at || 0)) oldest = ks[j]
+      delete m[oldest]
+      ks = Object.keys(m)
+    }
+    root.terrain = m
+  }
+
+  // Everything a place owes us that we may already have. Called when the place
+  // changes, before anything is asked for.
+  function restoreTerrain() {
+    if (!loc) return false
+    var k = root.terrainKey(loc)
+    if (!Object.prototype.hasOwnProperty.call(root.terrain, k)) return false
+    var t = root.terrain[k]
+    if (!t) return false
+    if (t.ring) root.ring = t.ring
+    if (t.climate) root.climate = t.climate
+    if (t.horizon) root.horizon = t.horizon
+    if (t.water) root.water = t.water
+    root.elevation = t.elevation
+    root.hzH0 = t.hzH0
+    root.marineAsked = t.marineAsked
+    t.at = Date.now()
+    root._lastPush = -9999
+    return true
+  }
+
   function saveCache() {
     if (!loc) return
     var payload = { at: Date.now(), loc: loc, fc: fc, kp: kp,
                     ring: ring, elevation: elevation, climate: climate,
                     horizon: horizon, hzH0: hzH0, water: water,
                     chosen: chosenLoc,
+                    terrain: terrain,
                     // without this the cached hours are read against the wrong
                     // midnight for as long as it takes the first fetch to land
                     tz: tzOffset, tzn: tzName }
+    root.rememberTerrain()
+    payload.terrain = root.terrain
     var b64 = Qt.btoa(JSON.stringify(payload))
     if (b64.length > root.capCache) return   // never write what we would refuse to read
     // Concurrent saves are coalesced rather than raced: a write already in
@@ -1821,6 +2217,7 @@ Item {
       // dropped rather than kept if it fails.
       if (c.chosen && !root.configLoc) root.chosenLoc = root.validLoc(c.chosen)
       loc = c.loc
+      root.terrain = root.loadTerrain(c.terrain)
       // Restored before fc, for the same reason the network path sets it
       // first: t0 was measured against this zone's midnight.
       var ctz = root.finiteIn(c.tz, -50400, 50400)
@@ -1839,14 +2236,26 @@ Item {
                      && root.finiteIn(c.ring.sea, 0, 1) !== null) ? c.ring : null
       elevation = root.finiteIn(c.elevation, -500, 9000) || 0
       climate = (c.climate && root.finiteIn(c.climate.ai, 0, 100) !== null) ? c.climate : null
-      horizon = (c.horizon && root.capArray(c.horizon.coef, 16)
+      // The twelve coefficients go straight into hills0/1/2 as shader
+      // uniforms, so a string or a null in one slot is a NaN in a uniform and
+      // a blank overlay — which is the exact failure finiteIn() exists to
+      // stop. Counting them was never enough.
+      horizon = (c.horizon && root.numArray(c.horizon.coef, 16, -100, 100, false)
                            && c.horizon.coef.length === 12
                            && root.finiteIn(c.horizon.maxAng, -90, 90) !== null
                            && root.finiteIn(c.horizon.base, -500, 9000) !== null
                            && root.finiteIn(c.horizon.span, 0, 9000) !== null) ? c.horizon : null
       hzH0 = root.finiteIn(c.hzH0, -500, 9000) || 0
+      // frac, az and dist were going unchecked; dist scales the viewpoint and
+      // az points it, so a bad one aims the whole scene at nothing.
+      // `src` is absent in caches written before it existed; "ground" is the
+      // right default there, since every verdict then came from elevation.
+      if (c.water && c.water.src !== "marine") c.water.src = "ground"
       water = (c.water && root.finiteIn(c.water.kind, 0, 3) !== null
-                       && root.finiteIn(c.water.level, -500, 9000) !== null) ? c.water : null
+                       && root.finiteIn(c.water.level, -500, 9000) !== null
+                       && root.finiteIn(c.water.frac, 0, 1) !== null
+                       && root.finiteIn(c.water.az, 0, 360) !== null
+                       && root.finiteIn(c.water.dist, 0, 60000) !== null) ? c.water : null
       lastFetchMs = root.finiteIn(c.at, 0, 4102444800000) || 0
       pushSky()
       if (!ring || !horizon || !water) fetchHorizon()
@@ -1928,6 +2337,13 @@ Item {
   }
 
   function open(payloadJson) {
+    // Re-summoning is the retry. The top-up gives up after six attempts so a
+    // place the service will not answer for does not get asked forever — but
+    // that left no way back short of changing location. Opening it again is
+    // the obvious gesture and costs no new key, which matters because "any
+    // key dismisses" is the one property a screensaver must not lose.
+    root.topUps = 0
+    root.nextTopUpMs = 0
     root.checkLocation(true)
     root.syncTimeOfDay()
     root.opened = true
@@ -1979,6 +2395,15 @@ Item {
   // wttr.in stays as the fallback, so nothing new has to be reachable.
   Process {
     id: locProc
+    property string src: "ip"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: locProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(locProc.src, code, locProc.errText, locProc.ok)
+      locProc.ok = false; locProc.errText = ""
+    }
     command: root.curlCmd(8, root.capIp, "https://get.geojs.io/v1/ip/geo.json")
     stdout: StdioCollector {
       waitForEnd: true
@@ -1986,7 +2411,11 @@ Item {
         try {
           if (root.lockedLoc) return
           var j = root.boundedParse(text, root.capIp)
-          if (!j) return
+          if (j) locProc.ok = true
+          // A throw and not a return: this catch is what starts the wttr.in
+          // fallback, so returning here meant that being offline — the one
+          // case a fallback exists for — was the one case that never used it.
+          if (!j) throw new Error("no reply")
           var lat = parseFloat(j.latitude), lon = parseFloat(j.longitude)
           if (!isFinite(lat) || !isFinite(lon)) throw new Error("no fix")
           root.adoptIpLocation(lat, lon, j.city, j.country)
@@ -1999,6 +2428,15 @@ Item {
 
   Process {
     id: locFallbackProc
+    property string src: "ip"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: locFallbackProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(locFallbackProc.src, code, locFallbackProc.errText, locFallbackProc.ok)
+      locFallbackProc.ok = false; locFallbackProc.errText = ""
+    }
     command: root.curlCmd(8, root.capWttr, "https://wttr.in/?format=j1")
     stdout: StdioCollector {
       waitForEnd: true
@@ -2006,6 +2444,7 @@ Item {
         try {
           if (root.lockedLoc) return
           var wj = root.boundedParse(text, root.capWttr)
+          if (wj) locFallbackProc.ok = true
           var na = wj && root.capArray(wj.nearest_area, 8)
           if (!na || !na.length) return
           var a = na[0]
@@ -2019,6 +2458,15 @@ Item {
 
   Process {
     id: nearProc
+    property string src: "elevation"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: nearProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(nearProc.src, code, nearProc.errText, nearProc.ok)
+      nearProc.ok = false; nearProc.errText = ""
+    }
     property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
@@ -2026,6 +2474,7 @@ Item {
         if (root.stale(nearProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
+          if (ej) nearProc.ok = true
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
           var want = root.nearN * root.nearN
           if (!e || e.length < want) { root.fallbackFan(); return }
@@ -2040,59 +2489,19 @@ Item {
           }
           for (i = 0; i < want; i++) root.hzPts.push(dx[i], dy[i], e[i])
 
-          // How many samples sit at each exact elevation, and what the distinct
-          // levels are in order — flatness, and how low it is, are the whole test.
-          var count = {}, levels = []
-          for (i = 0; i < want; i++) {
-            var v = e[i]
-            if (count[v] === undefined) { count[v] = 0; levels.push(v) }
-            count[v]++
-          }
-          levels.sort(function (a, b) { return a - b })
-          var at = function (v) { return count[v] === undefined ? 0 : count[v] }
-
-          var lvl = null, best = 0
-          for (q = 0; q < levels.length; q++) {
-            var v2 = levels[q], n = at(v2)
-            if (n < 4) continue
-            // an isolated spike, not the shoulder of a smooth cluster
-            var isol = n / (1 + at(v2 - 1) + at(v2 + 1) + at(v2 - 2) + at(v2 + 2))
-            // and the lowest ground around: water is where water collects
-            if (isol >= 1.5 && q <= 1 && n > best) { best = n; lvl = v2 }
-          }
-
-          if (lvl === null) {
+          // The near field's own verdict. Its cells are the grid step squared
+          // and it measures the same 12 km box it always did.
+          var step0 = 2 * root.nearHalf / (root.nearN - 1)
+          var near = root.findWater(dx, dy, e,
+                                    4 * root.nearHalf * root.nearHalf,
+                                    step0 * step0)
+          if (!near && !(root.water && root.water.kind > 0)) {
             root.water = { level: 0, kind: 0, frac: 0, az: 0, dist: 0 }
-            root.fallbackFan(); return
           }
+          root.adoptWater(near)
+          if (!root.water || root.water.kind === 0) { root.fallbackFan(); return }
 
-          var frac = best / want
-          // Sea reads as exactly zero; past that it is how much of the near
-          // field the water covers that says whether it is open or a channel.
-          var kind = (lvl <= 1.0) ? 3 : (frac >= 0.12 ? 2 : 1)
-
-          // Which way it lies, and how far out it reaches along that bearing.
-          var sx = 0, sy = 0
-          for (i = 0; i < want; i++)
-            if (e[i] === lvl) { sx += dx[i]; sy += dy[i] }
-          sx /= best; sy /= best
-          var waz = (Math.atan2(sx, sy) * 180 / Math.PI + 360) % 360
-
-          var ds = []
-          for (i = 0; i < want; i++) {
-            if (e[i] !== lvl) continue
-            var a4 = Math.atan2(dx[i], dy[i]) * 180 / Math.PI
-            var rel4 = ((a4 - waz + 540) % 360) - 180
-            if (Math.abs(rel4) <= 25)
-              ds.push(Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]))
-          }
-          ds.sort(function (a, b) { return a - b })
-          // The median and not the farthest: the grid is a square, so its
-          // corners are 8.5 km out and a river running diagonally across one
-          // pushed the viewpoint to the cap and shrank Mount Royal by half.
-          var med = ds.length ? ds[Math.floor(ds.length / 2)] : 3000.0
-
-          root.water = { level: lvl, kind: kind, frac: frac, az: waz, dist: med }
+          var lvl = root.water.level, waz = root.water.az, med = root.water.dist
 
           // Stand across it, facing back. Near enough that the far shore still
           // reads, far enough that the water is genuinely in front of you.
@@ -2114,6 +2523,15 @@ Item {
 
   Process {
     id: fanProc
+    property string src: "elevation"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: fanProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(fanProc.src, code, fanProc.errText, fanProc.ok)
+      fanProc.ok = false; fanProc.errText = ""
+    }
     property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
@@ -2121,6 +2539,7 @@ Item {
         if (root.stale(fanProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
+          if (ej) fanProc.ok = true
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
           var want = root.hzFanAz * (root.hzRingsUsed || root.hzFan).length
           if (!e || e.length < want) return
@@ -2204,6 +2623,15 @@ Item {
 
   Process {
     id: fcProc
+    property string src: "forecast"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: fcProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(fcProc.src, code, fcProc.errText, fcProc.ok)
+      fcProc.ok = false; fcProc.errText = ""
+    }
     property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
@@ -2211,6 +2639,7 @@ Item {
         if (root.stale(fcProc)) return   // a reply for a place we have left
         try {
           var j = root.boundedParse(text, root.capForecast)
+          if (j) fcProc.ok = true
           if (!j) return
           var h = j.hourly
           if (!h) return
@@ -2297,6 +2726,7 @@ Item {
                    && root.inspectMode === 0)
             root.syncTimeOfDay()
           if (wasStale) { root.notice = true; noticeTimer.restart() }
+          root.lastFetchMs = Date.now()      // landed, not merely attempted
           root.pushSky(); root.refreshReadout(); root.saveCache()
         } catch (e) {}
       }
@@ -2305,6 +2735,15 @@ Item {
 
   Process {
     id: kpProc
+    property string src: "kp"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: kpProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(kpProc.src, code, kpProc.errText, kpProc.ok)
+      kpProc.ok = false; kpProc.errText = ""
+    }
     property int gen: 0
     command: root.curlCmd(8, root.capKp,
       "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json")
@@ -2312,7 +2751,9 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var arr = root.capArray(root.boundedParse(text, root.capKp), root.maxDaily)
+          var pj = root.boundedParse(text, root.capKp)
+          if (pj) kpProc.ok = true
+          var arr = root.capArray(pj, root.maxDaily)
           if (!arr) return
           // Rows are objects — { time_tag, kp, ... } — and only those carrying
           // a kp are consumed, so a row without one is skipped rather than
@@ -2342,6 +2783,15 @@ Item {
 
   Process {
     id: climProc
+    property string src: "climate"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: climProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(climProc.src, code, climProc.errText, climProc.ok)
+      climProc.ok = false; climProc.errText = ""
+    }
     property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
@@ -2349,6 +2799,7 @@ Item {
         if (root.stale(climProc)) return   // a reply for a place we have left
         try {
           var cj = root.boundedParse(text, root.capClimate)
+          if (cj) climProc.ok = true
           var d = cj && cj.daily
           if (!d) return
           var dp = root.numArray(d.precipitation_sum, root.maxDaily, 0, 5000, true)
@@ -2374,6 +2825,15 @@ Item {
 
   Process {
     id: elevProc
+    property string src: "elevation"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: elevProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(elevProc.src, code, elevProc.errText, elevProc.ok)
+      elevProc.ok = false; elevProc.errText = ""
+    }
     property int gen: 0
     stdout: StdioCollector {
       waitForEnd: true
@@ -2381,9 +2841,10 @@ Item {
         if (root.stale(elevProc)) return   // a reply for a place we have left
         try {
           var ej = root.boundedParse(text, root.capElevation)
+          if (ej) elevProc.ok = true
           var e = ej && root.numArray(ej.elevation, root.maxPoints, -500, 9000, false)
           var want = 1 + root.hzAz * root.hzRings.length
-          if (!e || e.length < want) return
+          if (!e || e.length < want) { root.fetchNearField(); return }
           var h0 = e[0]
           var lo = e[0], hi = e[0], sea = 0
           for (var i = 0; i < e.length; i++) {
@@ -2425,25 +2886,152 @@ Item {
           }
           root.hzPts = pts
           root.hzTerrainAim = bestAz
+
+          // Pass 1 has just measured a 25 km disc, and water beyond the near
+          // field's 6 km box is exactly what it can see and the near field
+          // cannot. Toronto is the case: the geocoder puts it about 7 km
+          // inland, so Lake Ontario only grazes the near grid, while out here
+          // it is 23% of the samples at a dead flat 74 m. Costs no request —
+          // these elevations were fetched for the skyline anyway.
+          //
+          // The rings are 33 azimuths at 4, 11 and 25 km, so a sample stands
+          // for a wedge of its annulus rather than a square cell.
+          var ringArea = Math.PI * 25000.0 * 25000.0
+          var cellA = ringArea / (root.hzAz * root.hzRings.length)
+          var rdx = [], rdy = [], rel = []
+          for (var w1 = 0; w1 < pts.length; w1 += 3) {
+            rdx.push(pts[w1]); rdy.push(pts[w1 + 1]); rel.push(pts[w1 + 2])
+          }
+          root.adoptWater(root.findWater(rdx, rdy, rel, ringArea, cellA))
+
           root.pushSky(); root.saveCache()
           root.fetchNearField()
-        } catch (err) { /* no ring: the scene keeps its default landscape */ }
+        } catch (err) {
+          // The near field only needs `loc`, so one failed ring request must
+          // not take the whole three-pass terrain chain down with it — which
+          // is what calling it only from the success path used to do.
+          root.fetchNearField()
+        }
       }
     }
   }
 
   // Same geocoder Omarchy's weather panel uses, so no new service is involved.
   Process {
+    id: marineProc
+    property int gen: 0
+    property string src: "marine"
+    property bool ok: false
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: marineProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(marineProc.src, code, marineProc.errText, marineProc.ok)
+      marineProc.ok = false; marineProc.errText = ""
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (root.stale(marineProc)) return   // a reply for a place we have left
+        try {
+          // A multi-coordinate marine request answers with an ARRAY, one entry
+          // per point, unlike every other endpoint here.
+          var mj = root.boundedParse("{\"a\":" + String(text || "") + "}",
+                                     root.capMarine)
+          var arr = mj && root.capArray(mj.a, 32)
+          if (!arr) return
+          marineProc.ok = true
+          var want = root.marineRings.length * root.marineAz
+          if (arr.length !== want || root.marinePts.length !== want * 2) return
+
+          // The nearest point that answers with a real wave height is the
+          // nearest open water. A null is not missing data here, it is the
+          // model saying "this is land" — which is exactly the question.
+          var bestD = 1e9, bx = 0, by = 0
+          for (var i = 0; i < want; i++) {
+            var e = arr[i]
+            if (!e || typeof e !== "object" || Array.isArray(e)) return
+            var h = e.hourly
+            if (!h) continue
+            var wv = root.numArray(h.wave_height, 48, 0, 60, true)
+            if (!wv) return
+            var got = false
+            for (var j = 0; j < wv.length; j++)
+              if (wv[j] !== null && wv[j] !== undefined) { got = true; break }
+            if (!got) continue
+            // Where the model actually answered, not where we asked. Its grid
+            // cells are about nine kilometres across, so a probe snaps to the
+            // nearest wet cell and the two can differ by more than the probe
+            // radius — which had Limassol reporting the Mediterranean to the
+            // north of it. The reply echoes the cell it used, so use that.
+            var mlat = root.finiteIn(e.latitude, -90, 90)
+            var mlon = root.finiteIn(e.longitude, -180, 180)
+            var dx, dy
+            if (mlat !== null && mlon !== null) {
+              dy = (mlat - root.loc.lat) * 111320.0
+              dx = (mlon - root.loc.lon) * 111320.0
+                 * Math.max(0.05, Math.cos(root.loc.lat * Math.PI / 180))
+            } else {
+              dx = root.marinePts[2 * i]; dy = root.marinePts[2 * i + 1]
+            }
+            var d = Math.sqrt(dx * dx + dy * dy)
+            if (d < bestD) { bestD = d; bx = dx; by = dy }
+          }
+          if (bestD > 1e8) return          // no open water anywhere we asked
+
+          // Only ever adds sea the ground could not show us; it never
+          // overrules a river or a lake the elevation pass actually measured.
+          root.adoptWater({ level: 0, kind: 3, src: "marine",
+                            frac: bestD <= 8000.0 ? 0.30 : 0.14,
+                            az: (Math.atan2(bx, by) * 180 / Math.PI + 360) % 360,
+                            dist: bestD })
+          root.pushSky(); root.saveCache()
+        } catch (err) { /* no marine answer: the ground's verdict stands */ }
+      }
+    }
+  }
+
+  Process {
     id: geoProc
+    property string src: "geocode"
+    property bool ok: false          // set by a good parse, read by onExited
+    property string errText: ""
+    stderr: StdioCollector { waitForEnd: true
+                             onStreamFinished: geoProc.errText = text }
+    onExited: function (code, status) {
+      root.noteExit(geoProc.src, code, geoProc.errText, geoProc.ok)
+      geoProc.ok = false; geoProc.errText = ""
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           var gj = root.boundedParse(text, root.capGeocode)
+          if (gj) geoProc.ok = true
           var gr = gj && root.capArray(gj.results, 32)
-          if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchNote = "Nothing found" } return }
+          // A country answers with its centroid, which is a point in a field
+          // somewhere. Somewhere people live is usually what was meant — but
+          // only in the same country: the five answers for "Cyprus" are the
+          // republic, the island, a village in Jamaica, a hamlet in England
+          // and a town in South Africa, and preferring a populated place
+          // without checking the country sends you to Jamaica, which is a
+          // worse answer than the mountain it replaced.
+          if (gr && gr.length > 1) {
+            var cc0 = root.capStr(gr[0].country_code, 4)
+            var top = root.capStr(gr[0].feature_code, 12)
+            if (cc0 && top.substring(0, 3) !== "PPL") {
+              for (var gi = 1; gi < gr.length; gi++) {
+                if (!gr[gi]) continue
+                if (root.capStr(gr[gi].country_code, 4) !== cc0) continue
+                if (root.capStr(gr[gi].feature_code, 12).substring(0, 3) !== "PPL") continue
+                gr = [gr[gi]].concat(gr)
+                break
+              }
+            }
+          }
+          if (!gr || !gr.length) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchFailed = true; root.searchNote = root.geoFailNote() } return }
           var r = root.validLoc(gr[0])
-          if (!r) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchNote = "Nothing found" } return }
+          if (!r) { if (root.geoForSearch) { root.geoForSearch = false; root.searching = false; root.pendingWhen = null; root.searchFailed = true; root.searchNote = root.geoFailNote() } return }
           // validLoc has already canonicalised the coordinates and capped the
           // strings, so this is the sanitised object, not the reply.
           var nl = r
@@ -2455,17 +3043,18 @@ Item {
             root.fc = null; root.kp = null
             root.ring = null; root.climate = null; root.horizon = null; root.water = null
             root._lastPush = -9999
-            root.searching = false; root.searchNote = ""
+            root.searching = false; root.searchFailed = false; root.searchNote = ""
           }
           root.loc = nl
           root.fetchForecast(); root.fetchKp(); root.fetchHorizon(); root.fetchClimate()
+          root.fetchMarine()
           root.saveCache()
         } catch (e) {
           if (root.geoForSearch) {
             // say so rather than silently going somewhere else
             root.geoForSearch = false
             root.pendingWhen = null
-            root.searchNote = "No such place"
+            root.searchFailed = true; root.searchNote = root.geoFailNote()
           } else if (!locProc.running) locProc.running = true
         }
       }
@@ -2995,6 +3584,31 @@ Item {
       }
     }
 
+    // Anchored to the top, deliberately: the readout Column at the bottom gates
+    // all its children through one opacity, and this is the one line that must
+    // not fade out with the six-second notice.
+    Text {
+      // Anything rendered here can carry API- or user-supplied text, and AutoText would
+      // interpret it as markup. Set on every Text without exception, so the rule is
+      // checkable by grep rather than by reading each binding.
+      textFormat: Text.PlainText
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.top: parent.top
+      anchors.topMargin: parent.height * 0.06
+      horizontalAlignment: Text.AlignHCenter
+      color: "#e8a37c"
+      style: Text.Outline
+      styleColor: "#66000000"
+      font.pixelSize: Math.max(11, root.sceneH * 0.0155)
+      font.letterSpacing: 0.4
+      opacity: (root.troubleShown && root.trouble !== "") ? 0.88 : 0
+      visible: opacity > 0.01
+      Behavior on opacity { NumberAnimation { duration: 280 } }
+      // Only fixed strings and the already-capped place name are ever shown
+      // here — never curl's stderr, which echoes the request URL back.
+      text: root.trouble
+    }
+
     Item {
       id: keyCatcher
       anchors.fill: parent
@@ -3004,16 +3618,16 @@ Item {
         event.accepted = true
         if (root.searching) {
           if (event.key === Qt.Key_Escape) {
-            root.searching = false; root.searchText = ""; root.searchNote = ""
+            root.searching = false; root.searchText = ""; root.searchFailed = false; root.searchNote = ""
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.submitSearch()
           } else if (event.key === Qt.Key_Backspace) {
             root.searchText = root.searchText.slice(0, -1)
-            root.searchNote = ""
+            root.searchFailed = false; root.searchNote = ""
           } else if (event.text && event.text.length === 1
                      && event.text >= " " && root.searchText.length < 60) {
             root.searchText += event.text
-            root.searchNote = ""
+            root.searchFailed = false; root.searchNote = ""
           }
           return
         }
