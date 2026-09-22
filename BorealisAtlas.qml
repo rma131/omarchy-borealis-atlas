@@ -401,6 +401,13 @@ Item {
   readonly property var monthAbbr: ["jan","feb","mar","apr","may","jun",
                                     "jul","aug","sep","oct","nov","dec"]
   readonly property var weekdayAbbr: ["sun","mon","tue","wed","thu","fri","sat"]
+  // Full names, because three letters is not enough to recognise one by.
+  // Montreal begins "mon" and Marseille "mar", and matching on the first three
+  // read both as a date: the place was dropped and the search silently went to
+  // next Monday instead. A name has to be a prefix of the whole word.
+  readonly property var monthFull: ["january","february","march","april","may",
+                                    "june","july","august","september",
+                                    "october","november","december"]
   readonly property var plainMoments: ["today","tomorrow","yesterday","tonight",
                                        "noon","midday","midnight","morning",
                                        "afternoon","evening","night",
@@ -438,6 +445,14 @@ Item {
 
   // Returns { day, frac, solar } or null. One token it does not understand
   // means it understood none of them: a half-read date is worse than no date.
+  // Index of the one name `t` begins, or -1. Pure, so the rule that keeps
+  // Montreal a city rather than a Monday is testable on its own.
+  function namePrefix(t, names) {
+    for (var i = 0; i < names.length; i++)
+      if (names[i].substring(0, t.length) === t) return i
+    return -1
+  }
+
   function parseWhen(q) {
     var toks = String(q).toLowerCase().replace(/,/g, " ").split(/\s+/)
     var day = null, frac = null, solar = null, mon = null, dom = null, year = null
@@ -478,9 +493,12 @@ Item {
         dom = parseInt(m[1], 10); continue
       }
       if (t.length >= 3) {
-        var mi = root.monthAbbr.indexOf(t.substring(0, 3))
+        // A prefix of the whole name, not merely its first three letters:
+        // "sep", "sept" and "september" are all September, while "seppo" and
+        // "montreal" are places.
+        var mi = root.namePrefix(t, root.monthFull)
         if (mi >= 0) { mon = mi; continue }
-        var di = root.weekdayAbbr.indexOf(t.substring(0, 3))
+        var di = root.namePrefix(t, root.weekdayFull)
         if (di >= 0) { day = root.daysUntilWeekday(di); continue }
       }
       return null

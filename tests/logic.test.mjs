@@ -94,9 +94,10 @@ test("sky-astronomy: Phase is right to within minutes", () => {
 // ---- location-time ----------------------------------------------------------
 const midnight = () => new Date(2026, 8, 3, 0, 0, 0, 0);    // Thursday 3 September
 const T = load(["looksTemporal", "daysUntilWeekday", "daysUntilDate", "parseWhen",
-                "splitQuery", "whenSuggestions"], {
+                "splitQuery", "whenSuggestions", "namePrefix"], {
   midnightAtLoc: midnight,
   monthAbbr: extractArray(QML, "monthAbbr"),
+  monthFull: extractArray(QML, "monthFull"),
   weekdayAbbr: extractArray(QML, "weekdayAbbr"),
   weekdayFull: extractArray(QML, "weekdayFull"),
   plainMoments: extractArray(QML, "plainMoments"),
@@ -120,6 +121,18 @@ test("location-time: Place names that look like dates stay places", () => {
     assert.equal(T.splitQuery(q).place, q, q);
     assert.equal(T.splitQuery(q).when, "", q);
   }
+  // Three letters is not enough to know a month or a weekday by. Matching on
+  // them read Montreal as Monday and Marseille as March: the place was
+  // dropped without a word and the search went somewhere else entirely.
+  for (const q of ["Montreal 14:00", "Marseille 12 oct", "Augsburg 3pm",
+                   "Juneau 9h", "Decatur 14:00", "Novosibirsk +2"]) {
+    assert.equal(T.splitQuery(q).when, "", q);
+    assert.equal(T.parseWhen(q), null, q);
+  }
+  // ...while the names themselves, whole or abbreviated, still read as dates.
+  for (const q of ["sep 12", "sept 12", "september 12", "mon 14:00",
+                   "monday 14:00", "12 mar"])
+    assert.ok(T.parseWhen(q), q);
 });
 
 test("location-time: A moment it cannot read is refused whole", () => {
