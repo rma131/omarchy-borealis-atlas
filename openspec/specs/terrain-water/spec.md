@@ -101,9 +101,18 @@ Every elevation request SHALL carry at most 100 coordinates; the service rejects
 ### Requirement: Snow and trees follow real heights
 The system SHALL draw snow above the day's freezing level and trees below the
 latitude-dependent treeline, as horizontal contours across the measured ridge.
+Above the treeline the ground is not bare rock by definition: what is drawn
+there is decided by the `vegetation` capability's cover weight, and rock is only
+what is left where nothing grows.
 
 #### Scenario: Snow caps only the peaks above the freezing level
 - GIVEN Quito on a day whose freezing level is below Pichincha's summit
 - WHEN the scene is drawn
 - THEN only the part of the ridge above that height is white
+- VERIFIED: live
+
+#### Scenario: Above the treeline is not automatically rock
+- GIVEN Quito, whose paramo is thick with frailejones
+- WHEN the ridge above the treeline is drawn
+- THEN it carries low rosette cover rather than grey stone
 - VERIFIED: live

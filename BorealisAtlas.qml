@@ -1023,8 +1023,12 @@ Item {
   // What the place you are looking at still owes you. Also covers a request
   // that simply failed — a timeout or a rate limit used to leave a hole until
   // the next refresh, which for the horizon meant no horizon at all.
+  // A climate that answered before there was a growing season in this plugin
+  // has aridity and nothing else, and it is not stale — so without this it is
+  // never asked again and the season never arrives for anyone upgrading.
+  readonly property bool climateThin: climate === null || !climate.mt
   readonly property bool dataMissing:
-    loc !== null && (fc === null || kp === null || climate === null
+    loc !== null && (fc === null || kp === null || climateThin
                      || horizon === null || water === null || !marineAsked)
   property int topUps: 0
   property real nextTopUpMs: 0
@@ -1039,7 +1043,7 @@ Item {
     var did = false
     if (!fc && !fcProc.running)        { fetchForecast(); did = true }
     if (!kp && !kpProc.running)        { fetchKp();       did = true }
-    if (!climate && !climProc.running) { fetchClimate();  did = true }
+    if (climateThin && !climProc.running) { fetchClimate(); did = true }
     if ((!horizon || !water)
         && !elevProc.running && !fanProc.running && !nearProc.running)
       { fetchHorizon(); did = true }
@@ -1623,6 +1627,34 @@ Item {
     else if (kind === 2) { bank = 0.965; wave = 1.00; mirror = 3.2 }  // lake
     else if (kind === 3) { bank = 1.000; wave = 1.50; mirror = 4.2 }  // sea
     scene.shore = Qt.vector4d(bank, wave, mirror, 0)
+
+    // ---- what is growing, and what it is doing today ------------------------
+    // The day being looked at, not today: scrubbing through the window walks
+    // the season with it.
+    var dayLen = (o.set - o.rise) * 24.0
+    var di = 0, rate = 0, fcLows = null, fcD0 = null
+    if (fc && fc.rise && fc.rise.length > 1) {
+      di = Math.max(0, Math.min(fc.rise.length - 1,
+                                Math.floor((scene.tod * 24.0 - fc.t0) / 24.0)))
+      // Measured over a week rather than a day. Sunrise is reported to the
+      // minute and a single day moves it by one or two of those, so a
+      // day-to-day difference is mostly rounding — and its sign, which is what
+      // decides whether the year is closing or opening, can come out backwards.
+      var a = Math.max(0, di - 3), b = Math.min(fc.rise.length - 1, di + 3)
+      if (b > a) rate = ((fc.set[b] - fc.rise[b]) - (fc.set[a] - fc.rise[a]))
+                      * 24.0 / (b - a)
+      fcLows = fc.tmin; fcD0 = fc.d0
+    }
+    var cm = root.climate
+    var clim = (cm && cm.mt)
+             ? { ai: cm.ai, mt: cm.mt, mp: cm.mp, me: cm.me,
+                 lows: root.seasonLows(cm.lows, cm.lowsEnd, fcLows, fcD0, di,
+                                       root.leafNights) }
+             : null
+    var vg = root.vegetationState(loc ? loc.lat : 45, clim, dayLen, rate,
+                                  root.todToDate(scene.tod).getMonth())
+    scene.veg = Qt.vector4d(vg.canopy, vg.autumn, vg.evergreen, vg.browning)
+    scene.flora = Qt.vector4d(vg.rosette, vg.flatTop, vg.columnar, vg.groundCover)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -1661,7 +1693,14 @@ Item {
       else if (dur !== null && dur > 43200) { rise.push(0.02); set.push(0.98) }
       else { rise.push(0.48); set.push(0.52) }
     }
-    return { rise: rise, set: set }
+    // The nights of the window, and the day the window starts on. The archive
+    // knows the year's shape but stops about five days short of now, and it is
+    // the recent nights that turn a leaf — so the last three weeks come from
+    // here, and scrubbing forward walks the season forward with them.
+    var tn = root.numArray(dy ? dy.temperature_2m_min : null, root.maxDaily, -90, 60, true)
+    var d0 = (dy && dy.time && dy.time.length) ? root.capStr(dy.time[0], 10) : null
+    return { rise: rise, set: set,
+             tmin: (tn && tn.length === n) ? tn : null, d0: d0 }
   }
 
   // NOAA time_tag is a real instant in UTC. Kp is a global number, but *when*
@@ -1745,7 +1784,7 @@ Item {
       // note in resolveSky(): the weather code is the one field the models
       // disagree about, and these three are the ones they agree on.
       + ",cape,lifted_index,wind_gusts_10m"
-      + "&daily=sunrise,sunset,daylight_duration"
+      + "&daily=sunrise,sunset,daylight_duration,temperature_2m_min"
       + "&past_days=7&forecast_days=16&timezone=auto")   // 16 is the API max
     fcProc.running = true
   }
@@ -1772,7 +1811,11 @@ Item {
       "https://archive-api.open-meteo.com/v1/archive?latitude=" + loc.lat
       + "&longitude=" + loc.lon
       + "&start_date=" + iso(start) + "&end_date=" + iso(end)
-      + "&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=auto")
+      // Temperature too, because aridity alone cannot say when the leaves turn.
+      // Two more daily series on a request already being made: about 10 KB for
+      // the year, against a 256 KB cap.
+      + "&daily=precipitation_sum,et0_fao_evapotranspiration"
+      + ",temperature_2m_mean,temperature_2m_min&timezone=auto")
     climProc.running = true
   }
 
@@ -1934,6 +1977,186 @@ Item {
     nearProc.command = root.curlCmd(8, root.capElevation, root.elevationUrl(la, lo))
     nearProc.running = true
   }
+
+  // ---- the growing season ---------------------------------------------------
+  // The nights that count, ending on the day being looked at. The archive holds
+  // the older ones and the forecast window the recent and the coming ones; they
+  // overlap by however far the reanalysis lags, so the archive is cut back to
+  // where the window starts rather than both being poured in. Pure, so the
+  // joining can be tested on its own.
+  function seasonLows(archLows, archEnd, fcLows, fcD0, di, want) {
+    var out = []
+    if (archLows && archLows.length) {
+      var drop = 0
+      if (archEnd && fcD0) {
+        var gap = Math.round((Date.parse(archEnd + "T00:00:00Z")
+                            - Date.parse(fcD0 + "T00:00:00Z")) / 86400000)
+        if (isFinite(gap)) drop = Math.max(0, Math.min(archLows.length, gap + 1))
+      }
+      out = archLows.slice(0, archLows.length - drop)
+    }
+    if (fcLows && fcLows.length) {
+      var last = Math.min(di, fcLows.length - 1)
+      for (var i = 0; i <= last; i++)
+        if (fcLows[i] !== null && fcLows[i] !== undefined) out.push(fcLows[i])
+    }
+    return out.slice(Math.max(0, out.length - want))
+  }
+
+
+  // What is growing here, and what it is doing this month. Pure, like
+  // findWater(): everything it needs is passed in, so it can be run against a
+  // year of real weather in a test rather than only judged by eye.
+  //
+  //   clim   { ai, mt[12] mean C, mp[12] mm, me[12] mm PET, lows[] recent nights }
+  //   dayLen hours of daylight today
+  //   rate   change in day length, hours per day, signed — this is the one that
+  //          matters. At an equinox every place on earth is within minutes of
+  //          12 h, so day length itself separates nothing; the rate separates
+  //          Tromso (about ten minutes a day) from Kyoto (about two).
+  //
+  // Returns foliage state and the four form weights, all 0..1.
+  function vegetationState(lat, clim, dayLen, rate, month) {
+    var cl = function (v) { return Math.max(0, Math.min(1, v)) }
+    var none = { kind: "unknown", canopy: 1, autumn: 0, evergreen: 0.5, browning: 0,
+                 rosette: 0, flatTop: 0, columnar: 0, groundCover: 0 }
+    if (!clim || !clim.mt) return none
+
+    var i, Tc = 1e9, Tw = -1e9, moist = []
+    for (i = 0; i < 12; i++) {
+      if (clim.mt[i] < Tc) Tc = clim.mt[i]
+      if (clim.mt[i] > Tw) Tw = clim.mt[i]
+      // Each month against its own evaporative demand: the dry season is when
+      // the plants run short, not simply when it rains least.
+      moist.push(clim.mp[i] / Math.max(0.001, clim.me[i]))
+    }
+    var mMin = 1e9, mMax = -1e9
+    for (i = 0; i < 12; i++) { if (moist[i] < mMin) mMin = moist[i]
+                               if (moist[i] > mMax) mMax = moist[i] }
+    var now = 0
+    for (i = 0; i < 3; i++) now += moist[((month - i) % 12 + 12) % 12]
+    now /= 3.0
+    var ai = clim.ai, absLat = Math.abs(lat)
+    // How the rain falls against the warmth: a mediterranean climate is dry in
+    // its own summer, and that is a property of the place. Asking instead
+    // whether it is dry *now* put Sydney in one class in November and another
+    // in February — and a place must not change species with the calendar.
+    var order = []
+    for (i = 0; i < 12; i++) order.push(i)
+    order.sort(function (a, b) { return clim.mt[a] - clim.mt[b] })
+    var coolMoist = (moist[order[0]] + moist[order[1]] + moist[order[2]]) / 3.0
+    var warmMoist = (moist[order[9]] + moist[order[10]] + moist[order[11]]) / 3.0
+
+    // ---- what grows here ---------------------------------------------------
+    // Blended weights rather than a verdict; `kind` is only for the record.
+    // Warmth first, dryness second. Testing aridity first called Ouagadougou a
+    // desert at 0.23 when the Sahel is savanna — it is dry *and* tropical, and
+    // which of those decides the vegetation is the warmth.
+    //
+    // `range` is the annual swing in temperature, and near the equator it is the
+    // whole story: Quito swings 3 K and has no season to speak of, while Nairobi
+    // swings as little and has a real dry one. Aridity separates them.
+    var range = Tw - Tc
+    var kind, dec, ever, brownable
+    if (range < 6.0 && ai > 1.0 && Tw < 20.0) { kind = "tropical montane"; dec = 0.10; ever = 0.85; brownable = 0.15 }
+    else if (Tc >= 17 && mMin > 0.40)       { kind = "tropical";  dec = 0.05; ever = 0.95; brownable = 0.05 }
+    else if (Tc >= 17)                      { kind = "savanna";   dec = 0.60; ever = 0.25; brownable = 1.00 }
+    else if (ai < 0.30)                     { kind = "desert";    dec = 0.05; ever = 0.35; brownable = 0.70 }
+    else if (Tw < 9)                        { kind = "tundra";    dec = 0.40; ever = 0.30; brownable = 0.20 }
+    else if (Tc < 2 && Tw < 15)             { kind = "boreal";    dec = 0.45; ever = 0.60; brownable = 0.10 }
+    else if (Tc < 6)                        { kind = "deciduous"; dec = 0.85; ever = 0.15; brownable = 0.20 }
+    else if (warmMoist < 0.60 * coolMoist && mMax - mMin > 0.8)
+                                            { kind = "mediterranean"; dec = 0.15; ever = 0.80; brownable = 0.90 }
+    else                                    { kind = "mixed";     dec = 0.45; ever = 0.50; brownable = 0.35 }
+
+    // ---- turning, by cold ---------------------------------------------------
+    // Shortening days permit it; cold nights do it. Weighted by how fast the day
+    // is closing, which is what makes a Tromso autumn early and abrupt and a
+    // Kyoto one late and slow, on the very same date.
+    // Leaves are on while the month can support them, by this place's own
+    // climatology rather than by the calendar — which is what puts Montreal
+    // bare in November and Singapore never. The rising side lags a month, so
+    // spring comes back gradually instead of switching on.
+    // Coming into leaf and letting go of it are not the same threshold. A
+    // canopy is put out once the month can grow it, and held until the month is
+    // near freezing — which is why Montreal is still fully dressed in October
+    // while it is at its reddest, and bare a month later. Using the growth
+    // threshold for both dropped a quarter of the canopy in early October and
+    // cancelled the colour just as it should have been deepening.
+    var mPrev = (month + 11) % 12
+    var warm = cl((clim.mt[month] - root.leafGrowC) / 8.0)
+    var hold = cl((clim.mt[month] - root.leafFallC) / 6.0)
+    var on = (rate < 0) ? hold
+                        : Math.max(warm, cl((clim.mt[mPrev] - root.leafGrowC) / 8.0))
+
+    var autumn = 0
+    if (rate < -0.005 && dec > 0.10) {
+      var speed = cl(-rate / 0.10)
+      // Long days mean it is still summer whatever one cold night says: without
+      // this, a cool week in early July read as the turn beginning.
+      var shortDays = cl((14.5 - dayLen) / 2.0)
+      var chill = 0, n = clim.lows ? clim.lows.length : 0
+      for (i = 0; i < n; i++) chill += Math.max(0, root.leafChillC - clim.lows[i])
+      // Linear in accumulated cold. A square root was tried and gives the wrong
+      // SHAPE: it front-loads the display, so Montreal read nearly half-turned
+      // in the third week of September when the honest description is "some
+      // trees are changing". The turn should start slowly and then run.
+      chill = n ? cl(chill / (n * root.leafChillC)) : 0
+      // ...and there must still be leaves to colour: once they are down the
+      // display is over, not merely finished accumulating.
+      autumn = cl(chill * root.leafColdGain * (0.60 + 0.40 * speed))
+              * shortDays * cl(on / 0.30)
+    }
+    // ---- turning, by drought ------------------------------------------------
+    // The other half of the world browns when the rain stops, not when it cools.
+    // Only where the vegetation actually browns. Without `brownable`, the wet
+    // Andes came out three-quarters brown for having a drier quarter.
+    var browning = cl((0.50 - now) / 0.45) * cl((mMax - mMin) / 0.8) * brownable
+
+    // Leaves come off after they have turned, and only the deciduous share.
+    var fallen = 1.0 - on
+    if (kind === "savanna") fallen = Math.max(fallen, browning)
+    var canopy = 1.0 - dec * fallen
+
+    // ---- what it looks like -------------------------------------------------
+    // Above the treeline the shader used to draw bare rock, which is why the
+    // slopes above Quito were grey stone. A treeline means trees stop, not that
+    // nothing grows: what replaces them is paramo at the equator, tundra near
+    // the poles, and rock only where it is genuinely dry or very high.
+    // These describe what grows above the treeline HERE, not what is growing
+    // where the observer stands: the shader already knows, per pixel, which part
+    // of the ridge is above it. Keying them to the observer's own elevation put
+    // paramo at zero for a city that looks straight up at it.
+    var wet = cl((ai - 0.4) / 0.6)
+    var rosette = wet * cl((25.0 - absLat) / 15.0)
+    // Meadow and tundra, which start well below the arctic: the ground above a
+    // treeline is grass long before it is moss. Dryness is what leaves rock
+    // bare, not height — Phoenix has no cover to lose and Zermatt does.
+    var tundra  = wet * cl((absLat - 30.0) / 18.0)
+    var groundCover = cl(rosette + tundra)
+    var flatTop = (kind === "savanna" ? 1 : 0) * cl((mMax - mMin) / 1.0)
+    // A columnar cactus is a hot desert's, not a dry savanna's: the Sahel is as
+    // dry as Arizona and grows acacia. Warmth is the second gate, so a cold
+    // desert stays scrub.
+    var columnar = (kind === "desert" ? 1 : 0)
+                 * cl((0.45 - ai) / 0.35) * cl((Tw - 24.0) / 10.0)
+
+    return { kind: kind, canopy: canopy, autumn: autumn, evergreen: ever,
+             browning: browning, rosette: rosette, flatTop: flatTop,
+             columnar: columnar, groundCover: groundCover }
+  }
+
+  // Tuning for the turn. Nights below this do the colouring, and the gain sets
+  // how much of a month of them it takes. Both are calibrated against nine real
+  // years of weather in tests/logic.test.mjs — change them there first.
+  // The monthly mean a canopy needs to hold its leaves.
+  readonly property real leafGrowC: 4.0
+  // ...and the monthly mean below which it lets go of them.
+  readonly property real leafFallC: 5.0
+  readonly property real leafChillC: 16.0
+  readonly property real leafColdGain: 2.20
+  // How many nights back the turn is accumulated over.
+  readonly property int leafNights: 21
 
   // No water, or no answer: stand where you are and face whatever rises
   // highest, which is what this did before there was any water in it.
@@ -2147,8 +2370,7 @@ Item {
     o.ring = (t.ring && root.finiteIn(t.ring.spread, 0, 9000) !== null
                      && root.finiteIn(t.ring.sea, 0, 1) !== null)
            ? { spread: +t.ring.spread, sea: +t.ring.sea } : null
-    o.climate = (t.climate && root.finiteIn(t.climate.ai, 0, 100) !== null)
-              ? { ai: +t.climate.ai } : null
+    o.climate = root.validClimate(t.climate)
     o.horizon = null
     if (t.horizon && root.numArray(t.horizon.coef, 16, -100, 100, false)
                   && t.horizon.coef.length === 12
@@ -2166,6 +2388,25 @@ Item {
                 && root.finiteIn(t.water.dist, 0, 60000) !== null)
       o.water = { kind: +t.water.kind, level: +t.water.level, src: t.water.src,
                   frac: +t.water.frac, az: +t.water.az, dist: +t.water.dist }
+    return o
+  }
+
+  // A cached climate, rebuilt rather than trusted. The monthly profile is all
+  // or nothing: a year with eleven months in it would give the model a January
+  // that is really December and a season a month out of step, which is worse
+  // than no season at all — and aridity alone still works, as it did before.
+  function validClimate(c) {
+    if (!c || root.finiteIn(c.ai, 0, 100) === null) return null
+    var o = { ai: +c.ai }
+    var mt = root.numArray(c.mt, 12, -90, 60, false)
+    var mp = root.numArray(c.mp, 12, 0, 100000, false)
+    var me = root.numArray(c.me, 12, 0, 100000, false)
+    var lows = root.numArray(c.lows, root.leafNights, -90, 60, false)
+    if (mt && mp && me && lows && lows.length
+        && mt.length === 12 && mp.length === 12 && me.length === 12) {
+      o.mt = mt; o.mp = mp; o.me = me; o.lows = lows
+      o.lowsEnd = root.capStr(c.lowsEnd, 10)
+    }
     return o
   }
 
@@ -2338,6 +2579,12 @@ Item {
       if (!z || z.length !== n) return null
     }
     if (root.finiteIn(f.t0, -100000, 100000) === null) return null
+    // The window's nights, and the day it opens on. Daily, so they are not
+    // the hourly length — and a malformed pair is dropped rather than
+    // refusing the whole forecast, because the weather is still good.
+    var tn = root.numArray(f.tmin, root.maxDaily, -90, 60, true)
+    f.tmin = tn && tn.length >= 2 ? tn : null
+    f.d0 = /^\d{4}-\d{2}-\d{2}$/.test(String(f.d0)) ? String(f.d0) : null
     return f
   }
 
@@ -2371,6 +2618,10 @@ Item {
       // Series are re-checked exactly as they are on arrival from the network,
       // because a file can be edited and a cached fc feeds the same indexing.
       fc = root.validFc(c.fc)
+      // A forecast cached before there was a growing season in this plugin has
+      // no nights in it and is not stale, so it would be kept forever and the
+      // season would never move as the scene is scrubbed. No cache is better.
+      if (fc && !fc.tmin) fc = null
       // Instants, not hours: a cache written under another zone would
       // otherwise restore that zone's idea of when tonight is.
       kp = (c.kp && root.numArray(c.kp.ms, root.maxDaily, 0, 4102444800000, false)
@@ -2381,7 +2632,7 @@ Item {
       ring = (c.ring && root.finiteIn(c.ring.spread, 0, 9000) !== null
                      && root.finiteIn(c.ring.sea, 0, 1) !== null) ? c.ring : null
       elevation = root.finiteIn(c.elevation, -500, 9000) || 0
-      climate = (c.climate && root.finiteIn(c.climate.ai, 0, 100) !== null) ? c.climate : null
+      climate = root.validClimate(c.climate)
       // The twelve coefficients go straight into hills0/1/2 as shader
       // uniforms, so a string or a null in one slot is a NaN in a uniform and
       // a blank overlay — which is the exact failure finiteIn() exists to
@@ -2405,7 +2656,7 @@ Item {
       lastFetchMs = root.finiteIn(c.at, 0, 4102444800000) || 0
       pushSky()
       if (!ring || !horizon || !water) fetchHorizon()
-      if (!climate) fetchClimate()
+      if (climateThin) fetchClimate()
       // the cache says where you were, not where you are
       checkLocation(true)
       if (Date.now() - lastFetchMs >= cacheMaxAgeMs) refreshSky(true)
@@ -2531,7 +2782,7 @@ Item {
                  root._lastPush = -9999 }
     root.fetchForecast(); root.fetchKp()
     if (moved || !root.ring || !root.horizon || !root.water) root.fetchHorizon()
-    if (moved || !root.climate) root.fetchClimate()
+    if (moved || root.climateThin) root.fetchClimate()
   }
 
   // Location by IP. geojs is asked first because it tracks VPN and hosting
@@ -2855,7 +3106,8 @@ Item {
                       wspd: wspd, wdir: wdir,
                       cape: cape, li: li, gust: gust,
                       flz: flz,
-                      rise: sr.rise, set: sr.set }
+                      rise: sr.rise, set: sr.set,
+                      tmin: sr.tmin, d0: sr.d0 }
           // Kp's hours are measured against the target's midnight, and the
           // target may only just have changed.
           root.rebuildKpHours()
@@ -2956,13 +3208,53 @@ Item {
           // Iterated over the validated length, not over d.time: the two
           // series have been checked against each other, and the time axis is
           // not read here at all.
+          // The daily series used to be summed into one number and thrown
+          // away. A year has a *shape* — when it rains, when it is cold — and
+          // that shape is what says whether leaves turn in October, brown in
+          // the dry season, or never change at all.
+          var dt = root.numArray(d.temperature_2m_mean, root.maxDaily, -90, 60, true)
+          var dn = root.numArray(d.temperature_2m_min, root.maxDaily, -90, 60, true)
+          var tm = root.strArray(d.time, root.maxDaily, 40)
           var ps = 0, es = 0
           for (var i = 0; i < dp.length; i++) {
             ps += dp[i] || 0
             es += de[i] || 0
           }
           if (es <= 0) return
-          root.climate = { ai: ps / es }
+          var clim = { ai: ps / es }
+          // Monthly profile, and the nights of the last few weeks. Both are
+          // optional: an archive without temperature still gives aridity, and
+          // the scene simply keeps the vegetation it had.
+          if (dt && dn && tm && dt.length === dp.length && dn.length === dp.length
+              && tm.length === dp.length) {
+            var mt = [], mp = [], me = [], mn = [], k
+            for (k = 0; k < 12; k++) { mt.push(0); mp.push(0); me.push(0); mn.push(0) }
+            for (i = 0; i < dp.length; i++) {
+              var mo = parseInt(String(tm[i]).substring(5, 7), 10) - 1
+              if (!(mo >= 0 && mo < 12)) continue
+              if (dt[i] !== null && dt[i] !== undefined) { mt[mo] += dt[i]; mn[mo]++ }
+              mp[mo] += dp[i] || 0
+              me[mo] += de[i] || 0
+            }
+            var ok = true
+            for (k = 0; k < 12; k++) {
+              if (!mn[k]) { ok = false; break }
+              mt[k] = mt[k] / mn[k]
+            }
+            // The last three weeks of night-time lows, which is what actually
+            // turns a leaf. Kept raw rather than averaged: a handful of cold
+            // nights matters more than the mean they sit in.
+            var lows = []
+            for (i = Math.max(0, dn.length - 21); i < dn.length; i++)
+              if (dn[i] !== null && dn[i] !== undefined) lows.push(dn[i])
+            // The day the last of those nights falls on, so the forecast's own
+            // nights can be joined to them without counting the overlap twice.
+            if (ok && lows.length) {
+              clim.mt = mt; clim.mp = mp; clim.me = me; clim.lows = lows
+              clim.lowsEnd = root.capStr(tm[tm.length - 1], 10)
+            }
+          }
+          root.climate = clim
           root.pushSky(); root.saveCache()
         } catch (e) { /* no archive: the window heuristic stands in */ }
       }
@@ -3388,6 +3680,14 @@ Item {
       property vector4d umbra: Qt.vector4d(0, 0, 0, 0)
       // convective instability, warning tier
       property vector4d sev: Qt.vector4d(0, 0, 0, 0)
+      // The season the leaves are in: full canopy, nothing turned, half of it
+      // evergreen, nothing browned — which is what a place with no climate
+      // answer yet looks like, and what the scene looked like before there was
+      // a season in it at all.
+      property vector4d veg: Qt.vector4d(1, 0, 0.5, 0)
+      // What the vegetation is shaped like here. All zero is the ordinary mix
+      // of conifer and broadleaf the scene has always drawn.
+      property vector4d flora: Qt.vector4d(0, 0, 0, 0)
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.
