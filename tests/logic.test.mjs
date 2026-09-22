@@ -219,3 +219,119 @@ test("terrain-water: Fixtures and scenarios stay in step", () => {
   const used = new Set(["toronto", "montreal", "kansas", "quito", "amsterdam"]);
   for (const f of readdirSync(FIX)) assert.ok(used.has(f.split("-")[0]), `unused fixture ${f}`);
 });
+
+// ---- vegetation -------------------------------------------------------------
+// Run against nine cached years of real weather. Every threshold below is a
+// shape a person can check against the place they know, not a number copied out
+// of the implementation: "bare in November", "a month behind", "never turns".
+import { stateOn, PLACES } from "./climate.mjs";
+
+test("vegetation: Montreal turns through October and stands bare in November", () => {
+  const on = (d) => stateOn("montreal", d);
+  assert.equal(on("2026-07-15").autumn, 0, "no turn in midsummer");
+  assert.ok(on("2026-09-22").autumn > 0.15, "it has started by late September");
+  assert.ok(on("2026-09-22").autumn < 0.50, "but it is only starting");
+  assert.ok(on("2026-10-18").autumn > on("2026-09-22").autumn, "and it deepens");
+  assert.ok(on("2026-11-15").canopy < 0.25, "then the leaves are down");
+  assert.ok(on("2026-05-20").canopy > 0.95, "and back by late spring");
+});
+
+test("vegetation: Kyoto turns a month after Montreal", () => {
+  // Both are deciduous at nearly the same day length; what separates them is
+  // how cold the nights have been, which is the whole point of the model.
+  assert.ok(stateOn("kyoto", "2026-10-18").autumn < 0.10);
+  assert.ok(stateOn("kyoto", "2026-11-20").autumn > 0.40, "momiji, in its own season");
+  assert.ok(stateOn("montreal", "2026-11-20").canopy < 0.25, "while Montreal is bare");
+});
+
+test("vegetation: Tromso turns first and drops fastest", () => {
+  assert.ok(stateOn("tromso", "2026-09-22").autumn > stateOn("montreal", "2026-09-22").autumn);
+  assert.ok(stateOn("tromso", "2026-10-18").canopy < 0.70, "and is over by mid-October");
+});
+
+test("vegetation: Sydney is in leaf while Montreal is turning", () => {
+  const s = stateOn("sydney", "2026-09-22");
+  assert.equal(s.autumn, 0, "September is spring in the southern hemisphere");
+  assert.ok(s.canopy > 0.95);
+});
+
+test("vegetation: The tropics never turn", () => {
+  for (const place of ["singapore", "quito"])
+    for (const d of ["2026-03-21", "2026-06-21", "2026-09-22", "2026-12-21"]) {
+      const s = stateOn(place, d);
+      assert.equal(s.autumn, 0, `${place} ${d}`);
+      assert.ok(s.canopy > 0.90, `${place} ${d} canopy ${s.canopy}`);
+    }
+});
+
+test("vegetation: Ouagadougou browns with the dry season, not the calendar", () => {
+  assert.ok(stateOn("ouagadougou", "2026-02-10").browning > 0.80, "Harmattan");
+  assert.equal(stateOn("ouagadougou", "2026-09-22").browning, 0, "peak of the rains");
+  assert.equal(stateOn("ouagadougou", "2026-02-10").autumn, 0, "and it is not autumn");
+});
+
+test("vegetation: A place keeps its species all year", () => {
+  // The class is a property of the place. Deciding it from whether it happens
+  // to be dry this month made Sydney mediterranean in one season and mixed in
+  // the next, which is a scene changing what grows in it as you scrub.
+  for (const place of PLACES) {
+    const kinds = new Set(["2026-02-10", "2026-05-15", "2026-08-15", "2026-11-15"]
+                          .map((d) => stateOn(place, d).kind));
+    assert.equal(kinds.size, 1, `${place} is ${[...kinds].join(" and ")}`);
+  }
+});
+
+test("vegetation: Above the treeline is paramo at the equator and tundra near the poles", () => {
+  const quito = stateOn("quito", "2026-09-22"), tromso = stateOn("tromso", "2026-09-22");
+  assert.ok(quito.groundCover > 0.8 && quito.rosette > 0.8, "paramo, not bare rock");
+  assert.ok(tromso.groundCover > 0.8, "tundra covers its ground too");
+  assert.equal(tromso.rosette, 0, "but it is not rosettes");
+});
+
+test("vegetation: Dry ground above the treeline stays rock", () => {
+  const p = stateOn("phoenix", "2026-09-22");
+  assert.equal(p.groundCover, 0, "nothing carpets the Sonoran high ground");
+  assert.ok(p.columnar > 0.4, "and what grows below it stands as columns");
+  assert.equal(stateOn("ouagadougou", "2026-09-22").columnar, 0,
+               "the Sahel is as dry as Arizona and grows acacia, not cactus");
+  assert.ok(stateOn("ouagadougou", "2026-09-22").flatTop > 0.8);
+});
+
+test("vegetation: A place with no climate answer keeps its canopy", () => {
+  const V2 = load(["vegetationState"]).root;
+  const s = V2.vegetationState(45, null, 12, -0.03, 8);
+  assert.equal(s.canopy, 1);
+  assert.equal(s.autumn, 0);
+  assert.equal(s.groundCover, 0);
+});
+
+test("vegetation: The archive's nights stop where the forecast window starts", () => {
+  const S = load(["seasonLows"]).root;
+  // Five archive nights ending 12 Sep, a window opening on 10 Sep: the two
+  // overlap by three, and counting those twice would weight them twice.
+  const arch = [1, 2, 3, 4, 5], fc = [6, 7, 8, 9];
+  assert.deepEqual(S.seasonLows(arch, "2026-09-12", fc, "2026-09-10", 3, 21),
+                   [1, 2, 6, 7, 8, 9]);
+  assert.deepEqual(S.seasonLows(arch, "2026-09-12", fc, "2026-09-10", 0, 21),
+                   [1, 2, 6], "scrubbing back shortens the window with it");
+  assert.deepEqual(S.seasonLows(arch, null, null, null, 5, 21), arch,
+                   "no forecast nights: the archive still answers");
+  assert.deepEqual(S.seasonLows(arch, "2026-09-12", fc, "2026-09-10", 3, 4),
+                   [6, 7, 8, 9], "only the last few nights count");
+});
+
+test("vegetation: A cached climate is all twelve months or none", () => {
+  const C = load(["validClimate", "finiteIn", "numArray", "capStr"],
+                 { leafNights: extractNumber(QML, "leafNights") }).root;
+  const twelve = (v) => Array(12).fill(v);
+  assert.equal(C.validClimate(null), null);
+  assert.equal(C.validClimate({ ai: "x" }), null);
+  assert.deepEqual(C.validClimate({ ai: 1.2 }), { ai: 1.2 }, "aridity alone still works");
+  const short = C.validClimate({ ai: 1.2, mt: Array(11).fill(5), mp: twelve(60),
+                                 me: twelve(50), lows: [1, 2], lowsEnd: "2026-09-12" });
+  assert.deepEqual(short, { ai: 1.2 }, "eleven months would put the season a month out");
+  const full = C.validClimate({ ai: 1.2, mt: twelve(5), mp: twelve(60), me: twelve(50),
+                               lows: [1, 2], lowsEnd: "2026-09-12" });
+  assert.equal(full.mt.length, 12);
+  assert.equal(full.lowsEnd, "2026-09-12");
+});

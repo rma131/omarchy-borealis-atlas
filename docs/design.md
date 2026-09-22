@@ -862,3 +862,55 @@ whole day cycle is built on.
 
 The hash field costs nothing, fills the frame, and never has a dead band. The
 scene is a mood piece, not a planetarium.
+
+## Vegetation: the season, and what the place is made of
+
+Two different questions, answered from data the plugin already fetches.
+
+**When does it turn?** Not from the calendar, and not from day length. At an
+equinox every place on earth is within minutes of twelve hours, so on the day
+this was asked for the photoperiod separated nothing at all, and normalising it
+over the year invented a season at the equator, where the whole annual swing is
+about three minutes. What separates places is the **rate**: Tromsø is losing
+about ten minutes of daylight a day, Kyoto about two. That rate permits the
+turn; accumulated cold nights — below 16 °C, over the last three weeks — do it.
+Both come from series already held: `sunrise`/`sunset` and a daily minimum in
+the 23-day forecast window, joined to the archive's older nights.
+
+The rate is measured over a week rather than a day, because sunrise is reported
+to the minute and one day's difference is mostly rounding — its sign, which is
+what says whether the year is closing or opening, can come out backwards.
+
+The response to cold is linear. A square root was tried, to bring Tromsø and
+Montreal closer together, and it gives the wrong *shape*: it front-loads the
+display, putting Montreal at 0.42 turned in the third week of September when
+the honest description is "some trees are changing".
+
+**Leafing out and letting go are not the same threshold.** A canopy is put out
+once the month can grow it (4 °C) and held until the month is near freezing
+(5 °C on the falling side). With one threshold for both, Montreal shed a quarter
+of its canopy in early October; since the colour is carried on the leaves that
+are still up, that cancelled the display exactly when it should have been
+strongest.
+
+**What grows here?** From the shape of the whole year, never from this month.
+Deciding "mediterranean" by asking whether it is dry *now* made Sydney
+mediterranean in November and mixed in February — a scene changing species as
+the date is scrubbed. The test is the rain of the three warmest months against
+the three coldest.
+
+**A treeline means trees stop, not that nothing grows.** The shader used to
+force bare rock above it, which is why the slopes above Quito were grey stone
+when the real páramo is thick with frailejones. What replaces the trees is
+páramo near the equator, meadow and tundra from about 30° up, and rock only
+where it is genuinely dry — Phoenix, not Zermatt. Height is not what leaves
+stone bare; dryness is.
+
+Form is four blended weights — rosette, flat crown, columnar, ground cover —
+the way `land` already works, because the world has no hard edges. A columnar
+cactus is a hot desert's and not a dry savanna's: Ouagadougou has almost exactly
+Phoenix's aridity and grows acacia, so the class decides it and warmth is the
+second gate.
+
+The model was wrong twice before it was right, and both times only nine cached
+years of real weather showed it. They live in `tests/fixtures/climate/`.

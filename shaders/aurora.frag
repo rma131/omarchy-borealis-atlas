@@ -103,6 +103,16 @@ layout(std140, binding = 0) uniform buf {
     // How violent the weather is, as against merely how wet. A thunderstorm is
     // a state of the atmosphere, not a code — see resolveSky().
     vec4 sev;     // x convective instability, y warning tier, z spare, w spare
+    // The season, taken from this place's own year rather than from the
+    // calendar: how much canopy is still on the trees, how much of it has
+    // turned, how much of it never turns, and how far the ground itself has
+    // browned off in the dry season — which is the other half of the world's
+    // answer to autumn.
+    vec4 veg;     // x canopy, y turned, z evergreen share, w ground browning
+    // What the vegetation here is shaped like. Weights rather than a list of
+    // species, the way land already works: all zero is the ordinary mix of
+    // conifer and broadleaf this scene has always drawn.
+    vec4 flora;   // x rosette, y flat crown, z columnar, w cover above the line
 };
 
 // The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every
@@ -740,14 +750,41 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   float bare = clamp(0.12 + 0.80 * max(land.y, land.w) + 0.40 * land.x
                      + 0.25 * palm, 0.0, 0.97);
   bare = mix(bare, 0.97, aboveTree);
+  // Above the treeline the trees stop, and that is all it means. What takes
+  // over is paramo at the equator, tundra shrub near the poles, and bare rock
+  // only where it is genuinely dry or very high — so ground cover buys back
+  // some of that 0.97 instead of the line being the end of everything.
+  float alpGrow = aboveTree * flora.w;
+  bare = mix(bare, min(bare, 0.55), alpGrow);
+  // Savanna and desert stand apart, and the gaps are as much of the form as
+  // the crowns are.
+  bare = clamp(bare + 0.22 * flora.y + 0.30 * flora.z, 0.0, 0.97);
   float grow = (1.0 - land.y) * (1.0 - 0.85 * land.w) * (0.45 + 0.75 * land.z);
   float th = (hcell < bare) ? 0.0
            : (0.004 + 0.012 * hcell) * clamp(grow, 0.15, 1.4) * (1.0 + 1.3 * palm);
+  // Bare branches still stand up. They are thinner and a little lower, and only
+  // the share that sheds anything loses anything at all.
+  float shed = (1.0 - veg.x) * (1.0 - veg.z);
+  th *= 1.0 - 0.22 * shed;
+  // A savanna crown stands clear of the scrub, a columnar cactus taller still,
+  // and a rosette above the treeline is knee-high beside a tree — tundra
+  // lower again than paramo.
+  th *= 1.0 + 0.55 * flora.y + 0.85 * flora.z;
+  th = mix(th, th * mix(0.30, 0.55, flora.x), alpGrow);
   // Conifers come to a point where it is cold or high; broadleaf and palm
   // canopies are rounder, so the exponent carries the whole difference.
   float shp = mix(0.55, 2.3, clamp(land.x + land.w * 0.7, 0.0, 1.0));
   shp = mix(shp, 3.6, palm);
+  // A rosette is a blunt drum on a stem, never a point.
+  shp = mix(shp, 0.8, alpGrow * (0.35 + 0.65 * flora.x));
   float spike = pow(max(1.0 - abs(fract(fx * tw) * 2.0 - 1.0), 0.0), shp);
+  // Three crown profiles the exponent alone cannot make: the flat acacia
+  // crown, the narrow column, the rosette drum. Each is a plateau cut from the
+  // same sawtooth at a different height, so they cost a smoothstep apiece and
+  // no branch, and at weight zero they change nothing.
+  spike = mix(spike, smoothstep(0.10, 0.24, spike), flora.y);
+  spike = mix(spike, smoothstep(0.66, 0.80, spike), flora.z);
+  spike = mix(spike, smoothstep(0.40, 0.56, spike), alpGrow * flora.x);
   float silTop = ridgeTop - th * spike;
 
   float px = 1.5 / resolution.y;
@@ -768,6 +805,39 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     float rock = max(land.w, aboveTree);
     gNear = mix(gNear, vec3(98.0, 100.0, 106.0), rock);
     gFar  = mix(gFar,  vec3(54.0,  57.0,  64.0), rock);
+    // ...except where something grows above the line. Paramo runs olive,
+    // tundra runs ochre, and where there is no ground cover this does nothing
+    // and the rock stands — which is Zermatt, and is correct.
+    vec3 alp = mix(vec3(86.0, 84.0, 62.0), vec3(96.0, 106.0, 72.0), flora.x);
+    gNear = mix(gNear, alp * 1.18, alpGrow * 0.85);
+    gFar  = mix(gFar,  alp * 0.62, alpGrow * 0.85);
+    // The dry season browns the ground itself. That is a different event from
+    // the trees turning — it happens to grass, and it happens in places that
+    // never freeze.
+    gNear = mix(gNear, vec3(158.0, 138.0, 88.0), veg.w * 0.75);
+    gFar  = mix(gFar,  vec3(104.0,  90.0, 58.0), veg.w * 0.75);
+
+    // The canopy, as a mask. `spike` is a sawtooth across the whole width, so
+    // masking by it alone stripes the entire slope; the crowns only break the
+    // crest, so it is confined to the band just under the silhouette. Used for
+    // the turn here, and again below for keeping conifers dark under snow.
+    float tree = spike * step(0.0001, th) * exp(-into * 30.0);
+    // The turn. Only the share that is not evergreen can colour, and only what
+    // is still on the branch — once the leaves are down, what is left is wood.
+    float turn = veg.y * (1.0 - veg.z) * veg.x;
+    if (turn > 0.0) {
+      float ht = hash21(vec2(cell, 9.1));
+      // They do not all turn at once, and the ones that have gone over are the
+      // whole of what "fall is starting" looks like. Each tree has its own
+      // threshold and its own colour, so the slope turns tree by tree.
+      float amt  = clamp(turn * 2.0 - ht * 0.9, 0.0, 1.0) * tree * 0.85;
+      vec3  fire = mix(vec3(196.0, 96.0, 40.0), vec3(226.0, 158.0, 48.0), ht);
+      gNear = mix(gNear, fire,        amt);
+      gFar  = mix(gFar,  fire * 0.52, amt);
+    }
+    // And what is left when the canopy has gone.
+    gNear = mix(gNear, vec3(86.0, 76.0, 66.0), tree * shed * 0.70);
+    gFar  = mix(gFar,  vec3(46.0, 41.0, 36.0), tree * shed * 0.70);
     // night keeps its blue, warmed a little over dry ground
     vec3 nNear = mix(vec3(11.0, 14.0, 24.0), vec3(22.0, 18.0, 20.0), land.y * 0.7);
     vec3 nFar  = mix(vec3( 4.0,  5.0,  9.0), vec3(10.0,  8.0,  8.0), land.y * 0.7);
@@ -787,12 +857,10 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     // Lying snow (snow_depth), which is a different thing from snow falling:
     // the slope goes white while the conifers stay dark, the way it looks.
     if (wx2.w > 0.0) {
-      // `spike` is a sawtooth across the whole width, so masking by it alone
-      // striped the entire slope. The conifers only break the crest, so the
-      // dark-tree term is confined to the band just below the silhouette.
-      float treeBand = exp(-into * 30.0);
-      float tree = spike * step(0.0001, th) * treeBand;
-      float lay  = clamp(wx2.w * (1.0 - 0.65 * tree), 0.0, 1.0);
+      // Only what is still in leaf holds the snow off: a bare wood goes as
+      // white as the slope it stands on.
+      float lay = clamp(wx2.w * (1.0 - 0.65 * tree * mix(1.0, veg.x, shed)),
+                        0.0, 1.0);
       mtn = mix(mtn, vec3(0.86, 0.90, 0.96) * (0.16 + 0.84 * lit), lay * 0.92);
     }
     // Verglas: rain frozen onto the ground reads as a hard glassy sheen, not
@@ -1000,6 +1068,13 @@ void main() {
     vec3 turf  = mix(vec3(0.22, 0.29, 0.18), vec3(0.38, 0.46, 0.27), toward);
     turf = mix(turf, mix(vec3(0.16, 0.30, 0.16), vec3(0.28, 0.48, 0.26), toward),
                land.z);
+    // The same season as the ridge behind it, from the same two numbers, so
+    // the foreground and the slope cannot disagree about what month it is.
+    turf = mix(turf, mix(vec3(0.34, 0.30, 0.17), vec3(0.62, 0.55, 0.33), toward),
+               veg.w * 0.80);
+    // Leaf litter: what has come off the trees is on the ground under them.
+    turf = mix(turf, mix(vec3(0.30, 0.20, 0.11), vec3(0.54, 0.36, 0.18), toward),
+               veg.y * (1.0 - veg.z) * 0.45);
     sand = mix(turf, sand, dune);
     sand = mix(sand, stony, land.x);
     vec3 nightSand = mix(vec3(0.055, 0.062, 0.095), vec3(0.028, 0.032, 0.052), near);
