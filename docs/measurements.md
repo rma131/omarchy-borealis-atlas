@@ -135,3 +135,32 @@ The +7.5 W battery result stands as the power finding.)
 3. **Real finger validation.** Every touch check here drove the uniforms directly; no
    tool on this box can synthesise a `wl_touch` event (`wtype` is keyboard-only). The
    gesture handling itself is unexercised until you put a finger on the glass.
+
+## Re-measured 2026-09-22, with the battery mode
+
+Same machine, same method, **on mains this time** — the GPU's average clock is
+the metric that moves, because both modes are vsync-bound at ~55 fps on a 60 Hz
+panel and frame count therefore says nothing about how hard the GPU worked
+inside each frame. Overlay dismissed reads 302 MHz, against 301 in August, so
+the two sets of numbers are comparable.
+
+| Scene | GPU avg | vs full |
+|---|---|---|
+| Idle, overlay dismissed | 302 MHz | — |
+| Toronto, full (mains) | 1021 MHz | — |
+| Toronto, reflection taps 5 → 3 only | 995 MHz | −2.5 % |
+| Toronto, 75 % render resolution | 876 MHz | −14 % |
+| **Toronto, battery mode as shipped** | **688 MHz** | **−33 %** |
+| Banff, 75 % / 60 % render resolution | 703 / 601 MHz | −31 % / −41 % |
+
+**The scene costs more than it did.** 748 MHz average in August, 1021 now, against
+the same 1150 MHz ceiling — eclipses, storms, the globe and the growing season
+have all been added since. It now sits near the ceiling for most of every frame.
+
+**The 2026-08 remedy no longer applies.** "The bottom 18 % of the screen costs 5×
+the sky … dropping to 3 taps is the cheapest big win" is measured at 2.5 % today,
+and that is with a lake filling the foreground; at a place with a river it is a
+narrow band, and at a place with no water it is nothing at all. What works is
+drawing fewer pixels: 60 % in each dimension is 36 % of the fragments and a third
+off the clock. It is kept for battery only, because what it costs is sharpness in
+the tree crowns, which are the one thing in the scene a couple of pixels wide.

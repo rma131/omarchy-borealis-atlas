@@ -34,13 +34,16 @@ In scope, in order of effect:
 
 Out of scope:
 - a different visual style
-- rendering at reduced resolution and upscaling
+
+**Revised 2026-09-22 after measuring.** Rendering at reduced resolution was out
+of scope here and is now the main lever: the taps this proposal was built around
+measure at 2.5 % and resolution at 33 %. See design.md, "Corrections".
 
 ## Approach
 
 One `quality` number pushed as a uniform, with the expensive paths reading it, so
-there is no second shader to keep in step. Deferred until the growing-season work
-has landed.
+there is no second shader to keep in step — and the same number drives the render
+scale in QML, so there is one decision and not two.
 
 ## Capabilities affected
 

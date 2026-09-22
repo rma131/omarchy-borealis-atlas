@@ -113,6 +113,11 @@ layout(std140, binding = 0) uniform buf {
     // species, the way land already works: all zero is the ordinary mix of
     // conifer and broadleaf this scene has always drawn.
     vec4 flora;   // x rosette, y flat crown, z columnar, w cover above the line
+    // How much work this scene is worth. 1 is everything; below that the water
+    // is drawn from fewer and cheaper copies of the sky, which is where nearly
+    // all of the cost is and the one place the loss does not show — a mirror
+    // that wobbles cannot be read closely enough to miss a curtain.
+    vec4 qual;    // x quality 0..1, y,z,w spare
 };
 
 // The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every
@@ -413,7 +418,10 @@ vec3 starsAt(vec2 uv, float t, float thin, float angOff) {
 
 // Everything above the waterline; the water mirrors this whole stack.
 // fp = (duv.x, duv.y, emission gain, thinning)
-vec3 upperScene(vec2 uv, float t, vec4 fp) {
+// `cheap` is 0 for the sky you look at and 1 for the copies the water is made
+// of. It is a uniform in practice, so the branches below are coherent across
+// the whole draw rather than per pixel.
+vec3 upperScene(vec2 uv, float t, vec4 fp, float cheap) {
   float aspect = resolution.x / resolution.y;
 
   // ---- where the sun and moon are, and therefore what kind of sky this is --
@@ -505,7 +513,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
     // and the direction comes out tangential for free.
     float angSpan = min(ice.z * 1.10 / 60.0, 0.11);   // one frame of turning
     vec3 acc = vec3(0.0);
-    if (angSpan > 0.0006) {
+    if (angSpan > 0.0006 && cheap < 0.5) {
       for (int i = 0; i < 7; i++)
         acc += starsAt(uv, t, fp.w, (float(i) - 3.0) * angSpan * 0.1667);
       // a point smeared over a path is genuinely fainter; compensate only partly
@@ -532,7 +540,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
                        vec3(-0.15, 0.19, -0.27), 17.0, -0.5)
              + curtain(cuv, t, 0.42, 0.32, 0.55,
                        vec3(1.7, 3.3, 6.5), vec3(0.04, 0.025, 0.012),
-                       vec3(0.11, -0.23, 0.17), 31.0, 0.9);
+                       vec3(0.11, -0.23, 0.17), 31.0, 0.9) * (1.0 - cheap);
     auroraCol = cur * fp.z * auroraAmt;
     col += auroraCol;
   }
@@ -687,7 +695,7 @@ vec3 upperScene(vec2 uv, float t, vec4 fp) {
   }
 
   // meteors streak over the curtains
-  col += meteors(uv, t, aspect) * starAmt;
+  col += meteors(uv, t, aspect) * starAmt * (1.0 - cheap);
 
   // forested ridge standing on the waterline
   float fx = uv.x;
@@ -958,11 +966,19 @@ void main() {
     // thousandths apart — far finer than the field varies — so evaluating it
     // per tap would cost five times as much for no visible difference.
     vec4 rfp = fieldParams(touchField(vec2(ruv.x * aspect, ruv.y), t, aspect), aspect);
-    vec3 refl = upperScene(ruv, t, rfp) * 0.30
-              + upperScene(vec2(ruv.x, clamp(ruv.y - s, 0.0, 1.0)), t, rfp) * 0.22
-              + upperScene(vec2(ruv.x, clamp(ruv.y + s, 0.0, 1.0)), t, rfp) * 0.22
-              + upperScene(vec2(ruv.x, clamp(ruv.y - 2.0 * s, 0.0, 1.0)), t, rfp) * 0.13
-              + upperScene(vec2(ruv.x, clamp(ruv.y + 2.0 * s, 0.0, 1.0)), t, rfp) * 0.13;
+    // Five taps at full quality; three when the scene is being drawn cheaply,
+    // with the weight the outer pair carried handed back to the three that
+    // remain so the water does not darken as the mode changes.
+    float cheap = 1.0 - qual.x;
+    vec3 refl = upperScene(ruv, t, rfp, cheap) * 0.30
+              + upperScene(vec2(ruv.x, clamp(ruv.y - s, 0.0, 1.0)), t, rfp, cheap) * 0.22
+              + upperScene(vec2(ruv.x, clamp(ruv.y + s, 0.0, 1.0)), t, rfp, cheap) * 0.22;
+    if (cheap < 0.5) {
+      refl += upperScene(vec2(ruv.x, clamp(ruv.y - 2.0 * s, 0.0, 1.0)), t, rfp, 0.0) * 0.13
+            + upperScene(vec2(ruv.x, clamp(ruv.y + 2.0 * s, 0.0, 1.0)), t, rfp, 0.0) * 0.13;
+    } else {
+      refl *= 1.0 / 0.74;
+    }
 
     float cx = uv.x * 48.0;
     float ci = floor(cx);
@@ -1086,7 +1102,8 @@ void main() {
     vec2 muv = vec2(uv.x, WATERLINE - (uv.y - bank) * 3.2);
     muv.x += 0.004 * sin(uv.y * 40.0 + t * 2.6);
     muv.x += screenFld.x * 0.22;
-    vec3 sky1 = upperScene(clamp(muv, 0.0, 1.0), t, fieldParams(screenFld, aspect));
+    vec3 sky1 = upperScene(clamp(muv, 0.0, 1.0), t, fieldParams(screenFld, aspect),
+                           1.0 - qual.x);
     float band = exp(-near * 9.0);                 // hugs the far edge
     float heat = clamp((1.0 - land.x) * land.y, 0.0, 1.0) * day;
     col += sky1 * 0.16 * band;
@@ -1103,7 +1120,9 @@ void main() {
     if (wx2.w > 0.0)
       col = mix(col, vec3(0.86, 0.89, 0.95) * (0.14 + 0.86 * lit), wx2.w * 0.85);
   } else {
-    col = upperScene(uv, t, fieldParams(screenFld, aspect));
+    // The sky you actually look at is never drawn cheaply. Whatever the mode,
+    // the top four fifths of the screen is the same picture.
+    col = upperScene(uv, t, fieldParams(screenFld, aspect), 0.0);
   }
 
   // Fog sits in the air between you and the scene, so it goes on before the
@@ -1126,7 +1145,8 @@ void main() {
     float r = rainLayer(wp, t, 1.5, 30.0, 0.22 + lean) * 0.55
             + rainLayer(wp, t, 2.3, 46.0, 0.28 + lean) * 0.32
             // a third, faster, finer layer only under a real downpour
-            + rainLayer(wp, t, 3.6, 68.0, 0.34 + lean) * 0.34 * sev.y;
+            + ((sev.y > 0.001) ? rainLayer(wp, t, 3.6, 68.0, 0.34 + lean) * 0.34 * sev.y
+                               : 0.0);
     col += vec3(0.56, 0.66, 0.82) * r * wx.y * (0.80 + 0.55 * sev.y);
     // Past a certain rate you stop seeing individual rain and start seeing the
     // water in the air between you and everything else.

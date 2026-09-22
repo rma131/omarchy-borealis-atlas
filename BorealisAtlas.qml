@@ -19,6 +19,7 @@
 // DRAG_PX, is intent to interact and will not dismiss. Any key still dismisses.
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.UPower
 import Quickshell.Wayland
 import QtQuick
 
@@ -1582,6 +1583,32 @@ Item {
                        frozen: 0, verglas: 0, wind: 0, temp: null, cond: "",
                        kp: null, aurora: 0.12, has: false })
 
+  // ---- how much work this scene is worth ------------------------------------
+  // On mains, everything. On battery, the water is drawn from three cheap
+  // copies of the sky instead of five full ones — which is where the cost has
+  // always been: docs/measurements.md measured the bottom 18 % of the screen at
+  // five times the price of the sky above it. The sky itself is never drawn
+  // cheaply, so what you look at does not change.
+  //
+  // The same rule as omarchy-screensaver-dispatch, for the same reason: a
+  // machine with no battery has nothing to protect. UPower reports a desktop as
+  // not on battery, so the full scene is the default everywhere it can be.
+  readonly property bool onBattery: UPower.onBattery
+  function qualityFor(battery) { return battery ? 0.0 : 1.0 }
+  readonly property real quality: root.qualityFor(root.onBattery)
+  onQualityChanged: if (scene) root.pushSky()
+
+  // ...and the bigger lever, which is simply drawing fewer pixels. Measured on
+  // this machine: cutting the reflection taps is worth 2.5 % even with a lake
+  // filling the foreground, while rendering at 60 % and letting the compositor
+  // scale it back up is worth 41 %. A fragment shader costs what it costs per
+  // pixel, so the honest way to halve the bill is to ask for half the pixels.
+  //
+  // What it costs is sharpness in the one place the scene has pixel-fine
+  // detail: the tree crowns on the ridge, which are a couple of pixels wide.
+  // The shape still reads; the points go soft.
+  readonly property real renderScale: root.quality < 0.5 ? 0.60 : 1.0
+
   function pushSky() {
     if (!scene) return
     var o = resolveSky(scene.tod)
@@ -1673,6 +1700,7 @@ Item {
                                   root.todToDate(scene.tod).getMonth())
     scene.veg = Qt.vector4d(vg.canopy, vg.autumn, vg.evergreen, vg.browning)
     scene.flora = Qt.vector4d(vg.rosette, vg.flatTop, vg.columnar, vg.groundCover)
+    scene.qual = Qt.vector4d(root.quality, 0, 0, 0)
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -3630,7 +3658,13 @@ Item {
       id: scene
       anchors.fill: parent
       property real time: 0
-      property vector2d resolution: Qt.vector2d(width, height)
+      // The size actually being rendered, not the size on screen. The shader
+      // feathers the ridge at 1.5 of these and lays the starfield out in cells
+      // of fourteen, so telling it the screen size while drawing into a smaller
+      // texture would harden every edge and shrink every star by the same
+      // factor the picture is about to be stretched by.
+      property vector2d resolution: Qt.vector2d(width * root.renderScale,
+                                                height * root.renderScale)
       property vector4d stop0: root.stopVec(0)
       property vector4d stop1: root.stopVec(1)
       property vector4d stop2: root.stopVec(2)
@@ -3706,6 +3740,9 @@ Item {
       // What the vegetation is shaped like here. All zero is the ordinary mix
       // of conifer and broadleaf the scene has always drawn.
       property vector4d flora: Qt.vector4d(0, 0, 0, 0)
+      // Full quality until told otherwise: a scene that has not yet been
+      // pushed should look like the one this plugin has always drawn.
+      property vector4d qual: Qt.vector4d(1, 0, 0, 0)
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.
@@ -3726,6 +3763,15 @@ Item {
         }
       }
       fragmentShader: Qt.resolvedUrl("shaders/aurora.frag.qsb")
+
+      // On battery, draw into a smaller texture and let the compositor scale it
+      // up. `smooth` is what makes that a soft picture rather than a blocky
+      // one. At full quality the layer is off entirely, so there is no extra
+      // copy and nothing changes for anyone on mains.
+      layer.enabled: root.renderScale < 1.0
+      layer.smooth: true
+      layer.textureSize: Qt.size(Math.max(1, Math.round(width * root.renderScale)),
+                                 Math.max(1, Math.round(height * root.renderScale)))
 
       // All animation gated on the overlay being open: zero work while dismissed.
       NumberAnimation on time {

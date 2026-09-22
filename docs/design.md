@@ -914,3 +914,35 @@ second gate.
 
 The model was wrong twice before it was right, and both times only nine cached
 years of real weather showed it. They live in `tests/fixtures/climate/`.
+
+## What the scene costs, and the one lever that moves it
+
+A fullscreen fragment shader costs what it costs per pixel, so the honest way to
+halve the bill is to ask for fewer pixels. Everything else measured small.
+
+Cutting the water's reflection from five taps to three — the remedy
+`docs/measurements.md` named in August — is worth 2.5 % with a lake filling the
+foreground and nothing at all at a place with no water, because the reflection
+only runs below the waterline and most places are not on a lake. Rendering at
+60 % of each dimension and letting the compositor scale it back up is worth a
+third of the GPU clock, everywhere.
+
+Frame rate cannot see any of this. Both modes sit at ~55 fps on a 60 Hz panel:
+the work is vsync-bound, so what changes is how hard the GPU worked inside the
+frame, not how many frames arrived. The average clock is the metric that moves.
+
+Two details make the cheap mode look like the expensive one rather than like a
+blurred photograph of it:
+
+- **`resolution` is the render target's size, not the screen's.** The ridge is
+  feathered at `1.5 / resolution.y` and the starfield is laid out in cells of
+  fourteen of them. Passing the screen size while drawing into a smaller texture
+  hardens every edge and shrinks every star by exactly the factor the picture is
+  about to be stretched by.
+- **The sky is never drawn cheaply.** Only the copies of it that the water is
+  made from lose their third curtain, their meteors and their starfield blur. A
+  mirror that wobbles cannot be read closely enough to miss any of them.
+
+What it costs is the tree crowns, which are a couple of pixels wide and go soft.
+The silhouette and the autumn colour still read. That trade was made knowingly
+for battery only; on mains the layer is off and there is not even an extra copy.

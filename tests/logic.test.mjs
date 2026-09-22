@@ -348,3 +348,14 @@ test("vegetation: A cached climate is all twelve months or none", () => {
   assert.equal(full.mt.length, 12);
   assert.equal(full.lowsEnd, "2026-09-12");
 });
+
+// ---- performance ------------------------------------------------------------
+test("performance: Mains draws everything and battery does not", () => {
+  const Q = load(["qualityFor"]).root;
+  assert.equal(Q.qualityFor(false), 1.0, "on mains, everything");
+  assert.equal(Q.qualityFor(true), 0.0, "on battery, the cheaper scene");
+  // The render scale is derived from that one number, so this is the whole of
+  // the decision: getting it backwards would quietly halve the picture for
+  // every desktop and give every laptop the expensive one.
+  assert.ok(Q.qualityFor(false) > Q.qualityFor(true));
+});
