@@ -1,0 +1,33 @@
+name: Check
+
+# The same gate a person or any agent runs locally: scripts/check.sh. Invariants,
+# spec structure, and the plugin's own logic run against real fixtures. The
+# shader rebuild needs Qt tooling and lives in shader-provenance.yml; the
+# Omarchy validator needs Omarchy. check.sh skips both here and says so.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # ubuntu-24.04 ships Node 20+, which is all the logic tests need — so no
+    # setup action to pin and trust.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0   # the uniform-block rule compares against a base commit
+
+      - name: Run the gate
+        run: |
+          # The uniform block must still be a prefix of the base's: the target
+          # branch for a pull request, the previous main for a push.
+          if [ -n "${{ github.base_ref }}" ]; then base="origin/${{ github.base_ref }}"; else base="HEAD~1"; fi
+          node --version
+          scripts/check.sh "$base"

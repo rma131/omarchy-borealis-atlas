@@ -284,6 +284,14 @@ rebuilding the shader and clearing the QML cache, and
 [docs/build-provenance.md](docs/build-provenance.md) shows how to verify the
 one compiled artifact in this repository against its source.
 
+## Changing it
+
+Start with [AGENTS.md](AGENTS.md) — the same instructions for a person or for an
+agent on any model. What the plugin must do is specified in
+[`openspec/specs/`](openspec/specs/); every change is recorded under
+[`openspec/changes/`](openspec/changes/) with the request that prompted it; and
+`scripts/check.sh` is the gate. Nothing needs installing beyond Node.
+
 ## Credits
 
 ### Borealis, by Marko Stankovic

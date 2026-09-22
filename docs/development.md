@@ -7,6 +7,15 @@ all five palettes, carried here unchanged. They are marked in the headers of
 both files and accounted for in the [Credits](../README.md#credits). Improving
 them is allowed; doing it silently is not.
 
+**Start with [AGENTS.md](../AGENTS.md).** It is the entry point for anyone
+changing this repository, person or agent: how a change is recorded under
+`openspec/`, the rules that must not break, and what "done" means. The one
+command that decides "done" is:
+
+```sh
+scripts/check.sh
+```
+
 Notes for changing the plugin, not for using it. For that, see
 [the README](../README.md); for why the scene works the way it does, see
 [design.md](design.md).
