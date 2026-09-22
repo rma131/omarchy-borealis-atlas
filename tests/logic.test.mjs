@@ -94,7 +94,8 @@ test("sky-astronomy: Phase is right to within minutes", () => {
 // ---- location-time ----------------------------------------------------------
 const midnight = () => new Date(2026, 8, 3, 0, 0, 0, 0);    // Thursday 3 September
 const T = load(["looksTemporal", "daysUntilWeekday", "daysUntilDate", "parseWhen",
-                "splitQuery", "whenSuggestions", "namePrefix"], {
+                "splitQuery", "whenSuggestions", "namePrefix", "trailingWhen",
+                "suggestSplit"], {
   midnightAtLoc: midnight,
   monthAbbr: extractArray(QML, "monthAbbr"),
   monthFull: extractArray(QML, "monthFull"),
@@ -116,23 +117,74 @@ test("location-time: A place and a moment are told apart", () => {
   assert.equal(T.parseWhen("+3").day, 3);
 });
 
+test("location-time: A moment on the end of a place needs no separator", () => {
+  // The separator was punctuation the parser wanted, not something a person
+  // thinks to type.
+  const cases = [
+    ["Montreal 14:00", "Montreal", "14:00"],
+    ["Marseille 12 oct", "Marseille", "12 oct"],      // longest tail wins
+    ["Quito sunset", "Quito", "sunset"],
+    ["Berlin 2026-10-05", "Berlin", "2026-10-05"],
+    ["Washington DC 15:00", "Washington DC", "15:00"],
+    ["Istanbul tomorrow 15:00", "Istanbul", "tomorrow 15:00"],
+    ["Paris, France 14:00", "Paris, France", "14:00"],  // the comma is the place's
+  ];
+  for (const [q, place, when] of cases) {
+    const s = T.splitQuery(q);
+    assert.equal(s.place, place, q);
+    assert.equal(s.when, when, q);
+    assert.ok(T.parseWhen(s.when), `${q} -> ${s.when}`);
+  }
+  // A whole line that is a moment stays one, rather than becoming a place
+  // called "12" at a quarter past two.
+  assert.deepEqual(T.splitQuery("12 sep 14:00"), { place: "", when: "12 sep 14:00" });
+  // The suggestion list uses the same rule, so it offers what Return will do...
+  assert.equal(T.suggestSplit("Montreal 14:00").inWhen, true);
+  assert.equal(T.suggestSplit("Montreal 14:00").place, "Montreal");
+  // ...and one step ahead of it, because a half-typed moment cannot parse yet
+  // and the geocoder should not be asked about "Montreal 14:0".
+  assert.equal(T.suggestSplit("Montreal 14:0").inWhen, true);
+  assert.equal(T.suggestSplit("Istanbul su").inWhen, true);
+  assert.equal(T.suggestSplit("Istanbul su").place, "Istanbul");
+  assert.deepEqual(T.whenSuggestions(T.suggestSplit("Istanbul su").when).map((x) => x.text),
+                   ["sunrise", "sunset", "sunday"]);
+  // Only the plain moments count as a half-typed one. Months and weekdays share
+  // their first letters with too many places: "Santa Fe" is not Santa in
+  // February, and "Palo Alto" is not Palo at any hour.
+  for (const q of ["New York", "Santa Fe", "Palo Alto", "Ho Chi Minh", "Satu Mare"])
+    assert.equal(T.suggestSplit(q).inWhen, false, q);
+});
+
 test("location-time: Place names that look like dates stay places", () => {
   for (const q of ["March", "Sunday", "New York", "banana", "3"]) {
     assert.equal(T.splitQuery(q).place, q, q);
     assert.equal(T.splitQuery(q).when, "", q);
   }
   // Three letters is not enough to know a month or a weekday by. Matching on
-  // them read Montreal as Monday and Marseille as March: the place was
-  // dropped without a word and the search went somewhere else entirely.
-  for (const q of ["Montreal 14:00", "Marseille 12 oct", "Augsburg 3pm",
-                   "Juneau 9h", "Decatur 14:00", "Novosibirsk +2"]) {
-    assert.equal(T.splitQuery(q).when, "", q);
-    assert.equal(T.parseWhen(q), null, q);
+  // them read Montreal as Monday and Marseille as March, and the place was
+  // dropped without a word: the whole line parsed as a moment and the search
+  // went somewhere else entirely. These now split, but the place survives.
+  for (const [q, place] of [["Montreal 14:00", "Montreal"],
+                            ["Marseille 12 oct", "Marseille"],
+                            ["Augsburg 3pm", "Augsburg"],
+                            ["Juneau 9h", "Juneau"],
+                            ["Decatur 14:00", "Decatur"],
+                            ["Novosibirsk +2", "Novosibirsk"]]) {
+    assert.equal(T.parseWhen(q), null, `${q} is not a moment on its own`);
+    assert.equal(T.splitQuery(q).place, place, q);
   }
   // ...while the names themselves, whole or abbreviated, still read as dates.
   for (const q of ["sep 12", "sept 12", "september 12", "mon 14:00",
                    "monday 14:00", "12 mar"])
     assert.ok(T.parseWhen(q), q);
+  // Nor may a trailing word that happens to parse split a name. A bare weekday
+  // or month on the end of a line is far more often part of the name than a
+  // date somebody meant to type, and a number in a name is not a date at all.
+  for (const q of ["Satu Mare", "Santa Fe", "Rio de Janeiro", "Morning Sun",
+                   "Area 51", "Route 66", "Washington 3", "Sunday Creek"]) {
+    assert.equal(T.trailingWhen(q), null, q);
+    assert.equal(T.splitQuery(q).place, q, q);
+  }
 });
 
 test("location-time: A moment it cannot read is refused whole", () => {

@@ -514,6 +514,27 @@ Item {
   }
 
   // Where the place ends and the moment begins.
+  // The longest trailing moment that still leaves a place in front of it, or
+  // null. Longest, so "Marseille 12 oct" keeps the whole date rather than only
+  // the month.
+  //
+  // The tail has to look temporal on its own as well as parse, and that is the
+  // whole of what keeps this safe: `looksTemporal` wants a digit or a word from
+  // the moment vocabulary, so "Morning Sun" stays a town rather than becoming a
+  // Sunday in the morning, and "Satu Mare", "Santa Fe" and "Rio de Janeiro"
+  // stay themselves. A bare weekday or month at the end of a line is far more
+  // often part of a name than a date somebody meant to type.
+  function trailingWhen(q) {
+    var parts = String(q).trim().split(/\s+/)
+    for (var i = 1; i < parts.length; i++) {
+      var when = parts.slice(i).join(" ")
+      if (!root.looksTemporal(when) || !root.parseWhen(when)) continue
+      var place = parts.slice(0, i).join(" ").replace(/[\s,]+$/, "")
+      if (place.length) return { place: place, when: when }
+    }
+    return null
+  }
+
   function splitQuery(q) {
     var at = q.indexOf("@")
     if (at >= 0) return { place: q.substring(0, at).trim(),
@@ -521,8 +542,15 @@ Item {
     var c = q.lastIndexOf(",")
     if (c >= 0 && root.parseWhen(q.substring(c + 1).trim()))
       return { place: q.substring(0, c).trim(), when: q.substring(c + 1).trim() }
+    // The whole line first, so "12 sep 14:00" stays one moment and does not
+    // become a place called "12" at a quarter past two.
     if (root.looksTemporal(q) && root.parseWhen(q))
       return { place: "", when: q }
+    // Then a moment on the end of a place, with no separator at all, because
+    // that is what people type. Before this, "Montreal 14:00" went to whatever
+    // the geocoder made of the whole string and the time was lost.
+    var t = root.trailingWhen(q)
+    if (t) return { place: t.place, when: t.when }
     return { place: q, when: "" }
   }
 
@@ -575,6 +603,29 @@ Item {
     var c = q.lastIndexOf(",")
     if (c >= 0) return { place: q.substring(0, c).trim(),
                          when: q.substring(c + 1).trim(), inWhen: true }
+    // The same rule the search itself uses, so the list offers what pressing
+    // Return will actually do rather than disagreeing with it.
+    var t = root.trailingWhen(q)
+    if (t) return { place: t.place, when: t.when, inWhen: true }
+    // ...and one step ahead of it, because a moment still being typed cannot
+    // parse yet. A last word that has begun one is a digit or a sign, or the
+    // start of a word the moment vocabulary knows — enough to stop asking the
+    // geocoder about "Montreal 14:0" and offer times instead.
+    //
+    // Only the plain moments, deliberately: months and weekdays share their
+    // first letters with too many place names, and "Santa Fe" must not become
+    // Santa in February. Getting this wrong costs a wrong list for a moment and
+    // nothing more — splitQuery above still requires the tail to parse whole,
+    // so what Return does is right either way.
+    var parts = String(q).trim().split(/\s+/)
+    var last = parts[parts.length - 1]
+    if (parts.length > 1
+        && (/^[+-]?\d/.test(last)
+            || (last.length >= 2
+                && root.namePrefix(last.toLowerCase(), root.plainMoments) >= 0))) {
+      var head = parts.slice(0, parts.length - 1).join(" ").replace(/[\s,]+$/, "")
+      if (head.length) return { place: head, when: last, inWhen: true }
+    }
     return { place: q.trim(), when: "", inWhen: false }
   }
 
@@ -4215,11 +4266,11 @@ Item {
           horizontalAlignment: Text.AlignHCenter
           text: root.searchNote !== "" ? root.searchNote
               : (root.chosenLoc
-                 ? "A place, a moment, or both: Istanbul @ tomorrow 15:00"
+                 ? "A place, a moment, or both: Istanbul tomorrow 15:00"
                    + "  \u00b7  \u2191\u2193 to choose"
                    + "  \u00b7  empty Enter follows this machine again"
                    + "  \u00b7  Esc to cancel"
-                 : "A place, a moment, or both: Istanbul @ tomorrow 15:00"
+                 : "A place, a moment, or both: Istanbul tomorrow 15:00"
                    + "  \u00b7  \u2191\u2193 to choose  \u00b7  Esc to cancel")
         }
       }

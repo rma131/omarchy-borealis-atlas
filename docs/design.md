@@ -946,3 +946,32 @@ blurred photograph of it:
 What it costs is the tree crowns, which are a couple of pixels wide and go soft.
 The silhouette and the autumn colour still read. That trade was made knowingly
 for battery only; on mains the layer is off and there is not even an extra copy.
+
+## The separator was the parser's, not the user's
+
+The search accepted `place @ when` and `place, when`. Nobody thinks to type
+either. `Montreal 14:00` went to the geocoder as the whole string and the time
+was lost — and before the weekday-prefix fix it was worse than that: `mon`
+matched Monday, so the line parsed as a moment with no place at all and the
+search quietly went somewhere else.
+
+A trailing moment is now taken off a separator-less line, longest first, so
+`Marseille 12 oct` keeps the whole date rather than only the month. Two
+conditions keep it safe:
+
+- **The whole line is tested as a moment first**, so `12 sep 14:00` stays one
+  moment instead of becoming a place called "12" at a quarter past two.
+- **The tail must satisfy `looksTemporal` as well as parse.** That wants a digit
+  or a word from the moment vocabulary, which is what keeps "Morning Sun" a
+  town, "Santa Fe" a city and "Area 51" a place rather than the 51st of nothing.
+  A bare weekday or month at the end of a line is far more often part of a name
+  than a date somebody meant to type.
+
+The suggestion list uses the same function, so it offers what Return will
+actually do. It also runs one step ahead, treating a last word that has *begun*
+a moment — a digit, a sign, or the start of one of the plain moment words — as
+the moment being typed, which stops the geocoder being asked about
+"Montreal 14:0". Only the plain moments count there: months and weekdays share
+their first letters with too many places. Getting that wrong costs a wrong list
+for a keystroke and nothing more, because the committed parse still demands a
+tail that parses whole.
