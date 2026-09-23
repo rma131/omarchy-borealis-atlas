@@ -157,6 +157,38 @@ Item {
   readonly property real driftHoursPerMinute: 1.0
   property bool drifting: false
 
+  // ---- how often to draw ----------------------------------------------------
+  // A still picture is free: the overlay open and frozen draws 6.64 W against
+  // 6.62 W dismissed. Every watt this costs is the redrawing, so the cheap mode
+  // spends frames only where they can be seen.
+  //
+  // The sky drifts an hour of sky per minute of wall time, which moves the sun
+  // about a hundredth of a degree between frames at ten a second — invisible.
+  // A finger, a scrub and falling rain are not invisible, and they get frames.
+  //
+  // Pure, so the rule can be read and tested rather than inferred from timers.
+  function frameMsFor(lively, fastSky) {
+    if (lively) return 16       // being touched: give it everything
+    if (fastSky) return 33      // rain, snow or a storm has motion of its own
+    return 100                  // a calm sky, drifting
+  }
+  readonly property bool lively: root.scrubbing || root.todReturning
+                              || root.searching || root.inspectMode !== 0
+                              || root.todVel > 0.015 || root.settling
+  readonly property bool fastSky: root.sky !== null && root.sky !== undefined
+                               && (root.sky.rain > 0.02 || root.sky.snow > 0.02
+                                   || root.sky.storm > 0.02)
+  readonly property int frameMs: root.frameMsFor(root.lively, root.fastSky)
+  // Only the cheap mode is paced. On mains the declarative animation below is
+  // left exactly as it was, because it is vsync-aligned and a timer is not.
+  readonly property bool paced: root.renderScale < 1.0
+
+  // What the drift timer's `running` used to say inline. Shared now, because
+  // the paced clock has to ask the same question.
+  readonly property bool driftAllowed:
+    root.opened && !root.scrubbing && !root.todReturning
+    && !root.pinned && !root.settling && root.inspectMode === 0
+
   // Bleed the smear away once the drag stops. Without this the last velocity
   // would stick, because onTodChanged simply stops firing.
   Timer {
@@ -169,19 +201,39 @@ Item {
     }
   }
 
+  // `!todReturning` matters as much as `!scrubbing`: a drift tick assigns tod,
+  // which cancels the return animation and leaves the sky stranded wherever it
+  // had got to. That showed up the moment the return grew long enough to
+  // outlive the readout timer.
   Timer {
     interval: root.driftMs
     repeat: true
-    // `!todReturning` matters as much as `!scrubbing`: a drift tick assigns
-    // tod, which cancels the return animation and leaves the sky stranded
-    // wherever it had got to. That showed up the moment the return grew long
-    // enough to outlive the readout timer.
-    running: root.opened && !root.scrubbing && !root.todReturning
-             && !root.pinned && !root.settling && root.inspectMode === 0
+    running: root.driftAllowed && !root.paced
     onTriggered: {
       if (!scene) return
       root.drifting = true
       var step = (root.driftHoursPerMinute / 24.0) * (root.driftMs / 60000.0)
+      scene.tod = Math.min(root.todMax, scene.tod + step)
+    }
+  }
+
+  // ---- the paced clock ------------------------------------------------------
+  // ONE timer, and everything the scene animates hangs off it. Two is worse
+  // than useless: measured, two 33 ms timers at unrelated phases interleave
+  // into sixty renders a second and pay the timer overhead twice. Capping one
+  // of them alone saved nothing at all, because the other kept dirtying the
+  // scene every vsync.
+  Timer {
+    id: pacedClock
+    interval: root.frameMs
+    repeat: true
+    running: root.opened && root.paced
+    onTriggered: {
+      if (!scene) return
+      scene.time += root.frameMs / 1000.0
+      if (!root.driftAllowed) return
+      root.drifting = true
+      var step = (root.driftHoursPerMinute / 24.0) * (root.frameMs / 60000.0)
       scene.tod = Math.min(root.todMax, scene.tod + step)
     }
   }
@@ -3741,7 +3793,11 @@ Item {
       // instead of the animation winding back through the whole day. The shader
       // wraps it.
       property real tod: 0
+      // Interpolating between drift steps is what a vsync animation is for. A
+      // paced step is already the frame, so smoothing it would put the frames
+      // straight back.
       Behavior on tod {
+        enabled: !(root.paced && root.drifting)
         NumberAnimation {
           duration: root.todReturning ? root.todReturnMs
                   : (root.drifting ? root.driftMs : 110)
@@ -3825,12 +3881,15 @@ Item {
                                  Math.max(1, Math.round(height * root.renderScale)))
 
       // All animation gated on the overlay being open: zero work while dismissed.
+      // On mains this is what advances the shader clock, vsync-aligned and
+      // smooth. In the cheap mode pacedClock does it instead, in steps, and
+      // this must not also be running or the two would interleave.
       NumberAnimation on time {
         from: 0
         to: 3600
         duration: 3600000
         loops: Animation.Infinite
-        running: root.opened
+        running: root.opened && !root.paced
       }
     }
 

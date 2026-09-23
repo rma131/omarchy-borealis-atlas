@@ -241,3 +241,25 @@ the same time.
 Everything else measured below the noise floor individually. The aurora,
 starfield and meteors are gated on night and cost nothing in daylight; the third
 rain layer is gated on the storm tier.
+
+## After pacing the frames, 2026-09-23
+
+One clock, running only in the reduced-cost mode: 100 ms on a calm drifting sky,
+33 ms when there is rain, snow or a storm in it, 16 ms while the scene is being
+touched, scrubbed, searched or inspected.
+
+| State | Draw | GPU avg | Overlay's own cost | Runtime |
+|---|---|---|---|---|
+| Idle, dismissed | 6.62 W | 301 MHz | — | 6.8 h |
+| **Paced, calm sky** | **8.76 W** | **354 MHz** | **+2.14 W** | **5.2 h** |
+| Unpaced cheap mode | ~11.4 W | 589 MHz | +4.8 W | 4.0 h |
+| Full quality | 18.22 W | 863 MHz | +11.60 W | 2.5 h |
+
+**82 % of the overlay's cost is gone against full quality**, for the same
+picture. All three rates were observed: 354 MHz on a calm Montreal sky, 509 MHz
+at Quito while it drizzled, 658 MHz with the search open, and back to 392 MHz
+after dismissing it.
+
+What this leaves is a scene that costs about two watts to look at, on a machine
+whose shell already burns 39–45 % of a core doing nothing. The next honest
+target is not in this plugin.

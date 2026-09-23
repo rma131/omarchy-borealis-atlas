@@ -975,3 +975,25 @@ the moment being typed, which stops the geocoder being asked about
 their first letters with too many places. Getting that wrong costs a wrong list
 for a keystroke and nothing more, because the committed parse still demands a
 tail that parses whole.
+
+## Pacing: one clock, and only one
+
+A still picture is free — the overlay open and frozen draws the same as
+dismissed, at the idle GPU clock. So the reduced-cost mode does not draw the sky
+sixty times a second to show a sun that moves a hundredth of a degree between
+frames. It draws ten times a second, thirty when there is rain or a storm with
+motion of its own, and sixty the instant a finger, a scrub or the search arrives.
+
+The trap, measured twice before it was understood: **everything animated has to
+hang off one clock.** `tod` is animated by a `Behavior` and `time` by its own
+animation, and capping either alone saves nothing because the other keeps
+dirtying the scene every vsync. Driving them from two 33 ms timers is worse than
+doing nothing — they interleave at unrelated phases into sixty renders a second
+and pay the timer overhead twice, which measured *above* the unpaced baseline.
+
+For the same reason the `Behavior on tod` is disabled while drifting under that
+clock: a paced step already is the frame, and smoothing it would put the sixty
+frames straight back.
+
+Mains keeps the declarative vsync-aligned animation. A QML timer is not
+vsync-aligned, and there is no battery there to justify the judder.

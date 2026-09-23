@@ -411,3 +411,20 @@ test("performance: Mains draws everything and battery does not", () => {
   // every desktop and give every laptop the expensive one.
   assert.ok(Q.qualityFor(false) > Q.qualityFor(true));
 });
+
+test("performance: Frames are spent where they can be seen", () => {
+  const F = load(["frameMsFor"]).root;
+  // Being touched is the one case that must never be paced: a scrub, a ripple
+  // or a search has to answer at the rate the hand moves.
+  assert.equal(F.frameMsFor(true, false), 16);
+  assert.equal(F.frameMsFor(true, true), 16, "touch wins over weather");
+  // A calm sky drifts an hour of sky per minute, which is a hundredth of a
+  // degree of sun between frames at this rate. Nobody can see it.
+  assert.equal(F.frameMsFor(false, false), 100);
+  // Rain, snow and a storm have motion of their own and read badly that slow.
+  assert.equal(F.frameMsFor(false, true), 33);
+  // The order that matters: touched is never slower than weather, and weather
+  // is never slower than calm.
+  assert.ok(F.frameMsFor(true, false) < F.frameMsFor(false, true));
+  assert.ok(F.frameMsFor(false, true) < F.frameMsFor(false, false));
+});
