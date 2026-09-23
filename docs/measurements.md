@@ -263,3 +263,51 @@ after dismissing it.
 What this leaves is a scene that costs about two watts to look at, on a machine
 whose shell already burns 39–45 % of a core doing nothing. The next honest
 target is not in this plugin.
+
+## Spike: is a text-art mode a cheaper scene? 2026-09-23
+
+Run before building anything, to price a proposed braille/character-grid mode
+against the smooth one. On battery, 50 s windows, screen at 5 % brightness —
+**absolute watts here are not comparable with the sections above**, only the
+deltas within this table are. Dismissed idle is 301 MHz.
+
+| Configuration | GPU | over idle | W |
+|---|---|---|---|
+| Dismissed | 301 MHz | +0 | — |
+| Shipped: 60 % scale, 10 fps | 383 MHz | **+82** | 8.10 / 8.71 |
+| Scene at a braille grid, 320×180, 10 fps | 309 MHz | **+8** | 7.89 |
+| Fragments removed entirely, 10 fps | 313 MHz | +12 | 7.56 |
+| Fragments removed, 3 fps | 306 MHz | +5 | 7.46 |
+| Fragments removed, 60 fps | 317 MHz | +16 | 8.86 |
+| A trivial fullscreen pass, full resolution | 314 MHz | +13 | 8.37 |
+| A trivial fullscreen pass, at grid resolution | 306 MHz | +5 | 7.04 |
+
+**The frame-rate lever is spent.** With fragments removed, 60 → 10 fps is worth
+**1.30 W** and 10 → 3 fps is worth **0.10 W**. The pacing shipped earlier the
+same day already took all of it. A character grid's one structural advantage —
+that it can credibly run at 2–4 fps where a smooth gradient sky cannot — is
+therefore worth a tenth of a watt, which is nothing.
+
+**Drawing the scene at a braille grid removes 90 % of the overlay's GPU work**
+(+82 MHz → +8) **and that is worth about half a watt**, because the GPU was
+never the expensive part. The frame loop is.
+
+**Half a watt is below what this machine can measure.** The *same* configuration
+read 8.10 W and 8.71 W on two runs an hour apart, while its GPU clock reproduced
+at 383 MHz both times. Watts carry ±0.6 W here; the clock carries ±2 MHz.
+
+So: **a text-art mode is not a power feature.** It is worth building if it is
+worth looking at. And since a two-pass structure exists only to make fragments
+cheap, and cheap fragments are worth an unmeasurable half watt, the simple
+single-pass form — quantise to the dot centre inside the existing shader — is
+the one to build. One shader, one binary, no provenance change.
+
+### Measurement notes, both of which nearly spoiled this
+
+- **A battery fresh off the charger has not settled.** The dismissed baseline
+  read 8.39 W and then 7.16 W a few minutes later with nothing changed. Let it
+  discharge before trusting absolute watts.
+- **Assert the condition you are measuring.** An earlier attempt to measure a
+  battery-only code path produced three identical readings because the machine
+  had been plugged back in and the path never ran. The harness now refuses to
+  start on mains and prints whether the overlay is actually open.
