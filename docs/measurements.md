@@ -188,3 +188,56 @@ does not.
 Note also that +11.60 W is well above the +7.5 W measured in August 2026. The
 scene has grown — eclipses, storms, the globe, the growing season — and the cost
 grew with it.
+
+## Where the cost actually is, 2026-09-23
+
+Measured on battery, Montreal, 40–45 s windows. **Watts carry about ±1 W of
+run-to-run noise** on this machine — repeated runs of the same configuration
+gave 10.73, 11.35 and 12.29 W — while the GPU's average clock repeats to within
+a megahertz or two (589, 590 for the same config). So the clock is used here as
+the comparator and watts as the headline. Idle with the overlay dismissed is
+301 MHz and 6.62 W; the column is what each configuration adds to that.
+
+| Configuration | GPU avg | over idle | share of shipped |
+|---|---|---|---|
+| Overlay open, **frozen** | 301 MHz | **+0** | 0 % |
+| 10 fps, 60 % resolution | 356 MHz | +55 | 19 % |
+| 20 fps, 60 % resolution | 437 MHz | +136 | 47 % |
+| **10 fps, full resolution** | 471 MHz | **+170** | 59 % |
+| 30 fps, 60 % resolution | 514 MHz | +213 | 74 % |
+| 60 fps, 60 % resolution — *as shipped* | 589 MHz | +289 | 100 % |
+| 60 fps, full resolution | 863 MHz | +562 | 194 % |
+
+**A still picture is free.** The overlay open and frozen draws 6.64 W against
+6.62 W dismissed, at the idle clock. Every watt this thing costs is the
+redrawing, not the scene: the shader is expensive per frame and there is nothing
+expensive about the frame itself.
+
+**Frames buy more than pixels.** Ten frames a second at full resolution costs
+less than sixty at 60 % — +170 against +289 — so the blur that the battery mode
+currently pays for the saving could be given back and the saving increased at
+the same time.
+
+### Two things that are not levers
+
+- **The touch field.** `touchField1` returns early on a uniform comparison when
+  no finger is held and no ripple is alive, so it costs three comparisons per
+  pixel while nobody is touching. It is already free.
+- **A frame cap applied to one clock.** Capping `time` at 30 Hz saved nothing,
+  because `tod` is animated separately by a `Behavior` and was still dirtying
+  the scene every vsync. Driving both from separate 33 ms timers is *worse* than
+  useless: the two interleave at unrelated phases and produce sixty renders a
+  second between them, with the timer overhead on top. A frame cap has to be one
+  clock that everything hangs off.
+
+### What the frame is made of, at the shipped configuration
+
+| Feature removed | GPU avg | saving | share of +289 |
+|---|---|---|---|
+| Trees on the ridge | 535 MHz | −54 | 19 % |
+| Cloud deck | 551 MHz | −39 | 13 % |
+| Reflection taps 5 → 3 (already shipped) | — | −26 | 9 % |
+
+Everything else measured below the noise floor individually. The aurora,
+starfield and meteors are gated on night and cost nothing in daylight; the third
+rain layer is gated on the storm tier.
