@@ -68,3 +68,19 @@ resolution is worth 33 %. The numbers were put to the requester with the visual
 cost stated — the tree crowns go soft, which is the one place the scene has
 pixel-fine detail — and 60 % was chosen deliberately over 75 % and over
 shipping nothing.
+
+## Measured again on battery, 2026-09-23
+
+The GPU clock understated it. Unplugged, where `power_now` reports real draw:
+
+| State | Draw | GPU avg | Runtime on 45.2 Wh |
+|---|---|---|---|
+| Idle, dismissed | 6.62 W | 300 MHz | 6.8 h |
+| Battery mode | 10.73 W | 618 MHz | 4.2 h |
+| Full quality | 18.22 W | 863 MHz | 2.5 h |
+
+The overlay's own cost is +11.60 W at full and +4.11 W in the cheap mode: **65 %
+of it gone**, against the 33 % the clock had suggested. The clock is a governed,
+coarse quantity and it hides work that scales with resolution, so it is a sign
+of the direction but not of the size. Watts are the measurement; the clock is
+only what can be read while plugged in.

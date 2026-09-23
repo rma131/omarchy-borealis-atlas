@@ -23,15 +23,17 @@
   - [x] the cheaper scene still reads — sky, sun, lake glitter, treeline, text
         and globe all correct; crowns softer, silhouette and turned colour intact
   - [x] mains is unchanged — 1013 MHz on the real UPower path against 1021 before
-  - [ ] **not verified live: the switch on unplugging.** The battery branch was
-        exercised by forcing `qualityFor` to 0 and measured that way; UPower was
-        only observed reporting mains, because the machine was not unplugged
+  - [x] the switch on unplugging — verified 2026-09-23 with the machine
+        actually unplugged: UPower reported battery, the scene came up in the
+        cheap mode with no input, and the treeline was visibly softer while the
+        readout and globe stayed crisp
+  - [x] re-measured in watts, which is what the cost actually is:
+        **6.62 W idle · 10.73 W battery mode · 18.22 W full** on a 45.2 Wh cell,
+        so the overlay's own draw falls from +11.60 W to +4.11 W — a 65 % cut,
+        and 2.5 h of runtime becomes 4.2 h
 - [x] 2.4 If the shader changed: recompiled, digests updated in docs/build-provenance.md
 
 ## Close
 - [x] 3.1 Delta specs merged into openspec/specs/
 - [x] 3.2 Lasting findings moved from design.md into docs/design.md
-- [ ] 3.3 Change moved to openspec/changes/archive/<YYYY-MM-DD>-<change-id>/
-      **Held open on 2.3's last box.** Everything else is done and measured; the
-      one thing left is watching the scene switch when the cable comes out, and
-      that needs the cable out.
+- [x] 3.3 Change moved to openspec/changes/archive/<YYYY-MM-DD>-<change-id>/

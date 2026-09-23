@@ -164,3 +164,27 @@ narrow band, and at a place with no water it is nothing at all. What works is
 drawing fewer pixels: 60 % in each dimension is 36 % of the fragments and a third
 off the clock. It is kept for battery only, because what it costs is sharpness in
 the tree crowns, which are the one thing in the scene a couple of pixels wide.
+
+## Re-measured 2026-09-23, on battery, in watts
+
+The rows above use the GPU's average clock, because the machine was plugged in
+and `power_now` reports charging rather than draw. Unplugged, the real number is
+available again — and it is much larger than the clock suggested.
+
+Montreal, clear, 55 s windows, 45.2 Wh cell (`energy_full`):
+
+| State | Draw | GPU avg | Runtime |
+|---|---|---|---|
+| Idle, overlay dismissed | **6.62 W** | 300 MHz | 6.8 h |
+| Overlay open, battery mode | **10.73 W** | 618 MHz | 4.2 h |
+| Overlay open, full quality | **18.22 W** | 863 MHz | 2.5 h |
+
+**The overlay's own cost falls from +11.60 W to +4.11 W — 65 % of it gone**, and
+the machine goes from 2.5 h to 4.2 h with the sky on screen. The GPU clock had
+suggested 33 %; it understates the saving, because the clock is a coarse,
+governed quantity and the work it hides scales with resolution while the clock
+does not.
+
+Note also that +11.60 W is well above the +7.5 W measured in August 2026. The
+scene has grown — eclipses, storms, the globe, the growing season — and the cost
+grew with it.
