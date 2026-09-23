@@ -118,6 +118,24 @@ layout(std140, binding = 0) uniform buf {
     // all of the cost is and the one place the loss does not show — a mirror
     // that wobbles cannot be read closely enough to miss a curtain.
     vec4 qual;    // x quality 0..1, y,z,w spare
+    // Text art. The scene is drawn as a grid of braille cells: two dots across
+    // and four down per character, which is the most detail a character grid
+    // can carry while still reading as text rather than as a dither.
+    //   x  columns, and the switch: at zero none of this runs
+    //   y  rows
+    //   z  trees across the ridge, scaled back so the treeline does not moire
+    //      against the dot grid (0 keeps the scene's own 170)
+    //   w  dot radius as a fraction of the dot pitch
+    vec4 txt;
+    // Three inks, 60:30:10 — the hour's sky, its land, and what is bright in
+    // it. Flat colours computed in QML, so the whole scene is three tones.
+    // w on the inks carries the tone curve, because there was a spare float
+    // there and the alternative was another uniform. ink0.w is the luminance
+    // the sky of this hour sits at, after the gamma below; ink1.w is how hard
+    // the scene is pushed away from it.
+    vec4 ink0;    // 60 — sky, the field.   w: tone pivot
+    vec4 ink1;    // 30 — land and water.  w: contrast
+    vec4 ink2;    // 10 — sun, moon, lightning, aurora
 };
 
 // The sun used to rise at 06:00 and set at 18:00 everywhere on earth, every
@@ -355,6 +373,21 @@ vec3 curtain(vec2 uv, float t,
   b *= 0.75 + 0.25 * sin(t * 0.6 + baseY * 9.0);
   return ramp(rel) * b * alpha;
 }
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// Ordered dither with no array and no bitwise operators. The GLSL 120 target
+// this file is compiled for has neither: constant arrays are the C7516 hazard
+// the header warns about, and the usual Bayer construction needs the bit
+// operators that only arrive in GLSL 1.30. This is the recursive arithmetic
+// form — bayer2 enumerates {0, .5, .75, .25} over a 2x2, and each recursion
+// adds a quarter-weight finer level. Range [0, 0.9375], mean 0.46875.
+//
+// Ordered and not hashed on purpose: at ten frames a second a noise dither
+// would crawl once every tenth of a second, which reads as a fault rather than
+// as texture. Bayer holds still.
+float bayer2(vec2 a) { a = floor(a); return fract(a.x * 0.5 + a.y * a.y * 0.75); }
+float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
 
 // Meteors — gather form of aurora.py _draw_meteors; two co-prime slots
 vec3 meteors(vec2 uv, float t, float aspect) {
@@ -742,7 +775,10 @@ vec3 upperScene(vec2 uv, float t, vec4 fp, float cheap) {
   float treeBand = max(alt.z * 0.10, 0.004);
   float aboveTree = smoothstep(treeY + treeBand, treeY - treeBand, ridgeTop);
 
-  float tw = 170.0;
+  // 170 trees across a 320-dot grid is 1.88 dots per tree — a sawtooth just
+  // under two samples per period, which beats into a moire that *crawls*,
+  // because tod drifts continuously. Text mode asks for fewer, wider trees.
+  float tw = (txt.z > 0.0) ? txt.z : 170.0;
   float cell = floor(fx * tw);
   float hcell = hash21(vec2(cell, 3.7));
   // A hot wet coast grows palms. Drawn 170 across, a tree is a few pixels tall,
@@ -885,6 +921,21 @@ vec3 upperScene(vec2 uv, float t, vec4 fp, float cheap) {
 
 void main() {
   vec2 uv = qt_TexCoord0;
+  // ---- text art -----------------------------------------------------------
+  // One line does the whole thing: snap the coordinate to the centre of the
+  // braille dot it falls in, and every path below answers for that dot instead
+  // of for the pixel. The scene is untouched — it is being asked a coarser
+  // question, not a different one.
+  //
+  // This costs nothing and saves nothing: each pixel still evaluates the full
+  // scene, and neighbours inside a dot do identical redundant work. That is
+  // deliberate. The spike in docs/measurements.md priced the two-pass
+  // alternative that would remove the redundancy at about half a watt, which
+  // is under this machine's noise floor — so the simple form wins on every
+  // count that could be measured.
+  vec2 dots = txt.xy * vec2(2.0, 4.0);
+  vec2 pxuv = uv;                       // the real pixel, for drawing the dot
+  if (txt.x > 0.0) uv = (floor(uv * dots) + 0.5) / dots;
   float t = time;
   float aspect = resolution.x / resolution.y;
   vec2 tp = vec2(uv.x * aspect, uv.y);   // aspect-corrected, for touch only
@@ -923,6 +974,11 @@ void main() {
   float lit      = max(day, moonLit * 0.60);
 
   vec3 col;
+  // Which of the three inks this belongs to, decided where the scene already
+  // knows: the sky is the field, the ground and the water are the second tone.
+  // Guessing it back out of a colour afterwards is exactly what pass 2 of the
+  // rejected two-pass design would have had to do.
+  float cls = 0.0;
 
   // A lake in the Sahara was the last thing in the scene that ignored where you
   // are — and then a lake in Quito, which is drier only in the sense that it
@@ -1023,7 +1079,9 @@ void main() {
       vec3 iceCol = mix(col, vec3(0.62, 0.70, 0.80) * (0.14 + 0.86 * lit), 0.78);
       col = mix(col, iceCol, ice.x);
     }
+    cls = 1.0;
   } else if (uv.y >= WATERLINE) {
+    cls = 1.0;
     // ---- the ground you are standing on, where water does not reach -------
     // Everything from the near bank down: the whole foreground where there is
     // no water at all, a strip of bank in front of a river, nothing at all
@@ -1195,5 +1253,56 @@ void main() {
     }
   }
 
+  if (txt.x > 0.0) {
+    // Tone first. A night sky sits around 0.05 and a sunlit one around 0.6, so
+    // a linear threshold renders the night as nothing at all — the first
+    // attempt showed a black screen with a sun in it. The gamma lifts the
+    // darks until the sky stipples, which is the whole point of the medium.
+    float lum = pow(clamp(luma(col), 0.0, 1.0), 0.45);
+
+    // Which cell, and where inside it. Because the dots are drawn rather than
+    // looked up in a glyph there is no bitmask, no dot numbering and no table:
+    // the 2x4 lives entirely in the constant below.
+    vec2 cellPx = resolution / txt.xy;
+    vec2 cf     = fract(pxuv * txt.xy);
+    vec2 dIdx   = floor(cf * vec2(2.0, 4.0));
+
+    // The block of eight dots is inset inside its cell, so there is more space
+    // between cells than between the dots within one. That margin is what
+    // makes this read as characters rather than as a halftone screen — without
+    // it the dots tile evenly and the grid disappears.
+    vec2  ctr   = ((dIdx + 0.5) / vec2(2.0, 4.0) - 0.5) * 0.78 + 0.5;
+    float dist  = length((cf - ctr) * cellPx);
+    float pitch = min(cellPx.x * 0.5, cellPx.y * 0.25) * 0.78;
+
+    // Lit, against an ordered threshold so a gradient stipples instead of
+    // banding. Soft rather than a step: a dot near the threshold comes out
+    // small, which is what keeps a gradient a gradient.
+    // Against the hour's own sky, not a fixed number. A night sky sits near
+    // 0.26 after the gamma and a noon one near 0.78; a fixed pivot renders one
+    // of them as a black screen and the other as a white one. Both were built
+    // and looked at before this was understood.
+    float on = clamp((lum - ink0.w) * ink1.w + 0.5
+                     + (bayer4(floor(pxuv * dots)) - 0.46875) * 0.66, 0.0, 1.0);
+
+    // The dot's AREA tracks brightness — that is what the eye reads as tone —
+    // so the radius goes as the square root. No fwidth(): the 100es target
+    // needs an extension for derivatives, the same class of runtime failure as
+    // a const array, and the pixels per cell are already known.
+    float rad = txt.w * pitch * sqrt(on);
+    float m   = smoothstep(rad + 0.7, rad - 0.7, dist);
+
+    // The accent is for things that are genuinely bright — a sun, a moon, a
+    // lightning flash — so the threshold is high and coherent regions win it
+    // whole. The dominant/secondary split comes from `cls`, which the scene
+    // decided, rather than being guessed back out of a colour.
+    float acc = smoothstep(ink0.w + 0.14, ink0.w + 0.24, lum);
+    vec3  ink = mix(mix(ink0.rgb, ink1.rgb, cls), ink2.rgb, acc);
+
+    // Unlit dots are the page, not black: a trace of the dominant ink keeps the
+    // grid legible as a grid, which is most of why text art reads as text.
+    fragColor = vec4(mix(ink0.rgb * 0.07, ink, m), 1.0) * qt_Opacity;
+    return;
+  }
   fragColor = vec4(clamp(col + dither(uv), 0.0, 1.0), 1.0) * qt_Opacity;
 }

@@ -428,3 +428,65 @@ test("performance: Frames are spent where they can be seen", () => {
   assert.ok(F.frameMsFor(true, false) < F.frameMsFor(false, true));
   assert.ok(F.frameMsFor(false, true) < F.frameMsFor(false, false));
 });
+
+// ---- text-art ---------------------------------------------------------------
+const TA = load(["gridFor", "inkWeights", "inkPivot", "inkFor"], {
+  inkKeys: [
+    { s: [0x07, 0x0b, 0x14], l: [0x0d, 0x1a, 0x20], a: [0x35, 0xc8, 0xc8] },
+    { s: [0x2b, 0x1b, 0x3a], l: [0x1a, 0x24, 0x18], a: [0xe8, 0xa3, 0x7c] },
+    { s: [0x4a, 0x7f, 0xc1], l: [0x2e, 0x4a, 0x28], a: [0xff, 0xf3, 0xd0] },
+    { s: [0x7a, 0x3b, 0x52], l: [0x22, 0x1a, 0x18], a: [0xff, 0x9a, 0x4a] },
+  ],
+  inkPivots: extractArray(QML, "inkPivots"),
+}).root;
+
+test("text-art: A character cell keeps its dots square", () => {
+  const g = TA.gridFor(1536, 864);
+  const cellW = 1536 / g.cols, cellH = 864 / g.rows;
+  // two dots across, four down -- so the cell must be about 1:2 for the dots
+  // themselves to come out square.
+  assert.ok(Math.abs(cellH / cellW - 2) < 0.12, `cell ${cellW}x${cellH}`);
+  assert.ok(Math.abs((cellW / 2) - (cellH / 4)) < 0.6, "dots are square");
+  // Never degenerate on a small or odd panel.
+  for (const [w, h] of [[200, 120], [3840, 2160], [800, 1280]]) {
+    const s = TA.gridFor(w, h);
+    assert.ok(s.cols >= 20 && s.rows >= 8, `${w}x${h} -> ${JSON.stringify(s)}`);
+  }
+});
+
+test("text-art: Each hour has its own three tones", () => {
+  const rise = 0.28, set = 0.76;
+  const at = (t) => TA.inkWeights(t, rise, set);
+  assert.ok(at(0.00)[0] > 0.99, "midnight is night");
+  assert.ok(at(rise)[1] > 0.99, "sunrise is dawn");
+  assert.ok(at((rise + set) / 2)[2] > 0.99, "midday is noon");
+  assert.ok(at(set)[3] > 0.99, "sunset is dusk");
+  for (const t of [0, 0.15, 0.28, 0.4, 0.52, 0.76, 0.9]) {
+    const w = at(t);
+    assert.ok(Math.abs(w.reduce((a, b) => a + b, 0) - 1) < 1e-9, `sum at ${t}`);
+    assert.ok(w.every((v) => v >= 0), `no negative weight at ${t}`);
+  }
+  // A polar day: the sun is up almost the whole turn, so night never arrives.
+  assert.equal(TA.inkWeights(0.5, 0.02, 0.98)[0], 0, "polar day has no night");
+});
+
+test("text-art: The pivot tracks the hour", () => {
+  const rise = 0.28, set = 0.76;
+  const night = TA.inkPivot(0.0, rise, set);
+  const noon = TA.inkPivot((rise + set) / 2, rise, set);
+  assert.ok(noon > night + 0.3, `night ${night} vs noon ${noon}`);
+  // The inks move with it: midday's sky is brighter than midnight's.
+  const lum = (v) => 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z;
+  assert.ok(lum(TA.inkFor("s", (rise + set) / 2, rise, set))
+          > lum(TA.inkFor("s", 0.0, rise, set)) + 0.2);
+});
+
+test("text-art: Trees are coarser than the dots that draw them", () => {
+  // The scene's own 170 trees across a 320-dot grid is 1.88 dots per tree,
+  // which aliases into a moire that crawls as the sky drifts.
+  for (const [w, h] of [[1536, 864], [3840, 2160], [1280, 800]]) {
+    const g = TA.gridFor(w, h);
+    const trees = Math.max(8, g.cols / 2);
+    assert.ok((g.cols * 2) / trees >= 2, `${g.cols} cols -> ${trees} trees`);
+  }
+});

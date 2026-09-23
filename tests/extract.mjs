@@ -55,7 +55,14 @@ export function extractNumber(src, name) {
 export function load(names, rootStub = {}) {
   const src = readFileSync(QML_PATH, "utf8");
   const root = { ...rootStub };
-  const context = vm.createContext({ root, Math, Date, JSON, String, Number,
+  // Enough of Qt for the pure functions that return one of its value types.
+  // They are plain structs in QML too; nothing here depends on Qt behaviour.
+  const Qt = {
+    vector2d: (x, y) => ({ x, y }),
+    vector4d: (x, y, z, w) => ({ x, y, z, w }),
+    size: (width, height) => ({ width, height }),
+  };
+  const context = vm.createContext({ root, Qt, Math, Date, JSON, String, Number,
                                      Array, Object, isFinite, parseFloat, parseInt });
   for (const name of names) {
     vm.runInContext(extractFunction(src, name), context, { filename: `${name}()` });

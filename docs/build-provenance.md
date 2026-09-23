@@ -42,8 +42,8 @@ These are the bytes as shipped. They change only when the shader source or the
 
 | file | SHA-256 |
 |---|---|
-| `shaders/aurora.frag` (source) | `95f957721605c7fb084ccdf6c6d18fbfb1ff4c9fedaf4c06d2e284c5e357a4d6` |
-| `shaders/aurora.frag.qsb` (shipped) | `146a59ae6c8d4e350354af7ea0eb86fc1427abf450d77711ebb2dd5d0cd8a307` |
+| `shaders/aurora.frag` (source) | `f8e26b8057dd009d1056387a85b4d6cc46a3d34b41ccd4ec896d18180b75c34c` |
+| `shaders/aurora.frag.qsb` (shipped) | `73279a25763fb3b880b8abb3c3ec2a65b2184bda1a81f843f61a9fc1c1877257` |
 
 ## Verify it yourself
 

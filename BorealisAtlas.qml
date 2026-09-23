@@ -98,6 +98,85 @@ Item {
     paletteOverride = (cur + 1) % paletteNames.length
   }
 
+  // ---- text art -------------------------------------------------------------
+  // The scene drawn as a grid of braille cells. Set it on this plugin's entry
+  // in shell.json:  { "id": "...", "textArt": true }
+  //
+  // It is not a power feature, and docs/measurements.md says why with numbers:
+  // drawing at a character grid removes 90 % of the overlay's GPU work and that
+  // is worth about half a watt, under this machine's noise floor. It is here
+  // because of what it looks like.
+  readonly property bool configTextArt: {
+    var cfg = root.shell && root.shell.shellConfig
+    var plugins = (cfg && cfg.plugins) || []
+    for (var i = 0; i < plugins.length; i++) {
+      var e = plugins[i]
+      if (e && e.id === root.pluginId) return e.textArt === true
+    }
+    return false
+  }
+  property int textArtOverride: -1        // -1 follows shell.json
+  readonly property bool textArt: textArtOverride >= 0 ? textArtOverride === 1
+                                                       : configTextArt
+
+  // A character cell about 12 physical pixels wide and twice as tall, which
+  // makes its 2x4 dots square. Pure, so the arithmetic is testable.
+  function gridFor(w, h) {
+    var cell = 15.4                       // logical px; ~19 physical at 1.25
+    return { cols: Math.max(20, Math.round(w / cell)),
+             rows: Math.max(8,  Math.round(h / (cell * 2))) }
+  }
+
+  // 60:30:10, from the hour's sky. Four keyframes — night, dawn, noon, dusk —
+  // and the day slides between them, so the scene still says what time it is
+  // in three flat tones. s is the 60 (sky, the field), l the 30 (land and
+  // water), a the 10 (sun, moon, lightning).
+  readonly property var inkKeys: [
+    { s: [0x07,0x0b,0x14], l: [0x0d,0x1a,0x20], a: [0x35,0xc8,0xc8] },  // night
+    { s: [0x2b,0x1b,0x3a], l: [0x1a,0x24,0x18], a: [0xe8,0xa3,0x7c] },  // dawn
+    { s: [0x4a,0x7f,0xc1], l: [0x2e,0x4a,0x28], a: [0xff,0xf3,0xd0] },  // noon
+    { s: [0x7a,0x3b,0x52], l: [0x22,0x1a,0x18], a: [0xff,0x9a,0x4a] }   // dusk
+  ]
+
+  // How much of each keyframe this moment is. Dawn and dusk are narrow bands
+  // around the real sunrise and sunset of the day being looked at, noon fills
+  // the daylight between them, and night is whatever is left over — so a polar
+  // summer never reaches night and a polar winter never leaves it.
+  function inkWeights(tod, rise, set) {
+    var t = tod - Math.floor(tod)
+    var span = Math.max(0.02, set - rise)
+    var cl = function (v) { return Math.max(0, Math.min(1, v)) }
+    var dawn = cl(1 - Math.abs(t - rise) / 0.06)
+    var dusk = cl(1 - Math.abs(t - set)  / 0.06)
+    var noon = cl(1 - Math.abs(t - (rise + set) / 2) / (span / 2))
+    var night = cl(1 - (dawn + dusk + noon))
+    var sum = dawn + dusk + noon + night
+    if (sum <= 0) return [1, 0, 0, 0]
+    return [night / sum, dawn / sum, noon / sum, dusk / sum]
+  }
+
+  // Where this hour's sky sits on the dot scale, after the shader's gamma.
+  // The sky lands at about half coverage and everything else reads against it,
+  // which is what a halftone needs: a fixed pivot makes night a black screen
+  // and noon a white one.
+  readonly property var inkPivots: [0.26, 0.45, 0.78, 0.48]   // night dawn noon dusk
+  function inkPivot(tod, rise, set) {
+    var w = root.inkWeights(tod, rise, set), v = 0
+    for (var i = 0; i < 4; i++) v += root.inkPivots[i] * w[i]
+    return v
+  }
+
+  // which: "s" the 60, "l" the 30, "a" the 10.
+  function inkFor(which, tod, rise, set) {
+    var w = root.inkWeights(tod, rise, set)
+    var r = 0, g = 0, b = 0
+    for (var i = 0; i < 4; i++) {
+      var k = root.inkKeys[i][which]
+      r += k[0] * w[i]; g += k[1] * w[i]; b += k[2] * w[i]
+    }
+    return Qt.vector4d(r / 255, g / 255, b / 255, 0)
+  }
+
   // ramp stop i as vec4: rgb (0-1) + stop position in w
   function stopVec(i) {
     return Qt.vector4d(pal.c[i][0] / 255, pal.c[i][1] / 255, pal.c[i][2] / 255, pal.p[i])
@@ -1804,6 +1883,24 @@ Item {
     scene.veg = Qt.vector4d(vg.canopy, vg.autumn, vg.evergreen, vg.browning)
     scene.flora = Qt.vector4d(vg.rosette, vg.flatTop, vg.columnar, vg.groundCover)
     scene.qual = Qt.vector4d(root.quality, 0, 0, 0)
+
+    // ---- text art -----------------------------------------------------------
+    if (root.textArt) {
+      var gr = root.gridFor(scene.width, scene.height)
+      // Half as many trees as characters: at the scene's own 170 across a
+      // 320-dot grid a tree is 1.88 dots, which beats into a moire that crawls
+      // as the sky drifts. Two dots per tree is the coarsest that still reads
+      // as a treeline.
+      scene.txt = Qt.vector4d(gr.cols, gr.rows, Math.max(8, gr.cols / 2), 0.40)
+      var pv = root.inkPivot(scene.tod, o.rise, o.set)
+      var i0 = root.inkFor("s", scene.tod, o.rise, o.set)
+      var i1 = root.inkFor("l", scene.tod, o.rise, o.set)
+      scene.ink0 = Qt.vector4d(i0.x, i0.y, i0.z, pv)     // w: tone pivot
+      scene.ink1 = Qt.vector4d(i1.x, i1.y, i1.z, 2.0)    // w: contrast
+      scene.ink2 = root.inkFor("a", scene.tod, o.rise, o.set)
+    } else if (scene.txt.x !== 0) {
+      scene.txt = Qt.vector4d(0, 0, 0, 0.36)
+    }
   }
 
   function hoursFromMidnightLocal(iso) {      // "2026-08-27T14:00", local
@@ -3850,6 +3947,12 @@ Item {
       // Full quality until told otherwise: a scene that has not yet been
       // pushed should look like the one this plugin has always drawn.
       property vector4d qual: Qt.vector4d(1, 0, 0, 0)
+      // Text art, off. x is the column count and the switch both: at zero the
+      // shader does not take the braille path at all.
+      property vector4d txt: Qt.vector4d(0, 0, 0, 0.46)
+      property vector4d ink0: Qt.vector4d(0.03, 0.04, 0.08, 0)
+      property vector4d ink1: Qt.vector4d(0.05, 0.10, 0.13, 0)
+      property vector4d ink2: Qt.vector4d(0.21, 0.78, 0.78, 0)
       // `tod` must animate every frame for the sun to move smoothly, but the
       // weather it resolves to changes hourly, so only re-push when the sky has
       // moved a couple of minutes. This is most of the drift's cost.
